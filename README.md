@@ -101,7 +101,7 @@ skill, say "wrap up" at the end of a conversation, and upload the file it gives 
 | "The model on this Mac stopped responding" | Nothing to do: the rest is read on the next run. A file it stops on twice is set aside in `raw/_needs-review/`. |
 | A file was moved to `raw/_needs-review/` | It failed twice. Check that it opens, then upload it again. |
 | No notifications appear | Open System Settings → Notifications → **Script Editor** and allow notifications. |
-| macOS asks to let "Python" find devices on local networks | Choose **Don't Allow**. The wiki only talks to this Mac and works either way. |
+| macOS asks to let "Python" find devices on local networks | Choose **Don't Allow**. The wiki only talks to this Mac and works either way. If you allowed it earlier, switch it off in System Settings → Privacy & Security → Local Network. |
 
 Logs are in `~/Library/Logs/wiki-starter/`. Costs, privacy and how the two reading
 options compare are in `INSTALL.md`.

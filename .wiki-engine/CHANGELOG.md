@@ -2,6 +2,10 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## README: local network permission
+- The README says how to switch the "Python" local network permission off again if it
+  was allowed earlier (System Settings → Privacy & Security → Local Network).
+
 ## README: updating during a large upload
 - The README says when to update (when the Upload page shows Idle, since the update waits
   for a run to finish), and that "Waiting to convert" during a large upload means a later
