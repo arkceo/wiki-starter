@@ -25,6 +25,7 @@ import Flex from "./Flex"
 import ConditionalRender from "./ConditionalRender"
 import Sources from "./Sources"
 import Facts from "./Facts"
+import UploadButton from "./UploadButton"
 
 export {
   ArticleTitle,
@@ -54,4 +55,5 @@ export {
   ConditionalRender,
   Sources,
   Facts,
+  UploadButton,
 }

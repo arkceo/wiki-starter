@@ -132,7 +132,7 @@ def main():
         for p, ts, _ in items[:RECENT_N]:
             lines.append(f"| {ts} | {esc(p)} | `{folder(p)}` |")
     else:
-        lines.append("No documents filed yet. Drop one into **Wiki Intake** to start.")
+        lines.append("No documents filed yet. Click **Upload** (top right) to add one.")
     lines.append("")
     with open(OUT_MD, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))

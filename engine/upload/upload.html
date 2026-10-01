@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Upload &amp; Logs</title>
+<style>
+  :root {
+    --bg: #faf8f8; --panel: #ffffff; --text: #2b2b2b; --muted: #6b6b6b; --line: #e3e1e1;
+    --accent: #284b63; --accent-soft: #e6eef3; --ok: #2e7d4f; --warn: #a86400; --bad: #b3261e;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161618; --panel: #1f1f22; --text: #ebebec; --muted: #a3a3a8; --line: #33333a;
+      --accent: #84a59d; --accent-soft: #24302d; --ok: #6cc28f; --warn: #e0a54b; --bad: #f08b84;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161618; --panel: #1f1f22; --text: #ebebec; --muted: #a3a3a8; --line: #33333a;
+    --accent: #84a59d; --accent-soft: #24302d; --ok: #6cc28f; --warn: #e0a54b; --bad: #f08b84;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width: 60rem; margin: 0 auto; padding: 1.5rem 16px 4rem; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+  h1 { font-size: 1.6rem; margin: 0; }
+  h2 { font-size: 1.05rem; margin: 2rem 0 0.6rem; }
+  a { color: var(--accent); }
+  .muted { color: var(--muted); }
+  #drop { margin-top: 1.25rem; border: 2px dashed var(--line); border-radius: 12px; background: var(--panel);
+          padding: 2.25rem 1rem; text-align: center; transition: border-color .15s, background .15s; }
+  #drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  #drop strong { display: block; font-size: 1.15rem; margin-bottom: .35rem; }
+  .buttons { display: flex; gap: .5rem; justify-content: center; flex-wrap: wrap; margin-top: 1rem; }
+  button, .btn { font: inherit; font-weight: 600; border-radius: 8px; padding: .5rem .95rem; cursor: pointer;
+                 border: 1px solid var(--accent); background: var(--accent); color: #fff; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .55; cursor: default; }
+  .bar-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
+             margin-top: 1.25rem; padding: .75rem 1rem; background: var(--panel); border: 1px solid var(--line);
+             border-radius: 10px; }
+  #state::before { content: ""; display: inline-block; width: .6rem; height: .6rem; border-radius: 50%;
+                   margin-right: .45rem; background: var(--muted); vertical-align: middle; }
+  #state.busy::before { background: var(--warn); animation: pulse 1.2s infinite; }
+  #state.idle::before { background: var(--ok); }
+  @keyframes pulse { 50% { opacity: .3; } }
+  .overall { flex: 1 1 14rem; }
+  .meter { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin-top: .3rem; }
+  .meter > span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  .meter.done > span { background: var(--ok); }
+  .meter.warn > span { background: var(--warn); }
+  .meter.bad > span { background: var(--bad); }
+  #files { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 10px;
+           background: var(--panel); }
+  #files:empty::before { content: "Nothing uploaded yet."; display: block; padding: .9rem 1rem; color: var(--muted); }
+  #files li { padding: .75rem 1rem; border-top: 1px solid var(--line); }
+  #files li:first-child { border-top: 0; }
+  .file-head { display: flex; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
+  .file-name { font-weight: 600; word-break: break-word; }
+  .stage { font-size: .88rem; white-space: nowrap; }
+  .stage.ok { color: var(--ok); } .stage.warn { color: var(--warn); } .stage.bad { color: var(--bad); }
+  .steps { display: flex; gap: .25rem; margin-top: .45rem; }
+  .steps span { flex: 1; height: 6px; border-radius: 3px; background: var(--line); }
+  .steps span.on { background: var(--accent); }
+  .steps.done span.on { background: var(--ok); }
+  .steps.warn span.on { background: var(--warn); }
+  .steps.bad span.on { background: var(--bad); }
+  .steps .upl { position: relative; overflow: hidden; }
+  .steps .upl > i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--accent); }
+  .steps.done .upl > i { background: var(--ok); }
+  .steps.warn .upl > i { background: var(--warn); }
+  .steps.bad .upl > i { background: var(--bad); }
+  .detail { font-size: .86rem; color: var(--muted); margin-top: .35rem; word-break: break-word; }
+  .detail a { margin-right: .6rem; }
+  #log { margin: 0; padding: .75rem 1rem; height: 22rem; overflow: auto; border: 1px solid var(--line);
+         border-radius: 10px; background: var(--panel); font: 12.5px/1.55 var(--mono); white-space: pre-wrap; }
+  #log .t { color: var(--muted); }
+  #log .bad { color: var(--bad); } #log .ok { color: var(--ok); } #log .warn { color: var(--warn); }
+  #log .old { opacity: .6; }
+  #log .divider { color: var(--muted); border-top: 1px dashed var(--line); margin: .4rem 0; padding-top: .2rem; }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Upload &amp; Logs</h1>
+    <a href="/" id="back">← Back to the wiki</a>
+  </header>
+  <p class="muted" id="intro">Drop documents (PDF, Word, Excel, PowerPoint, scans, photos) to turn them into wiki
+    pages, or Update Packets (<code>.md</code>) to update pages. Everything stays on this Mac.</p>
+
+  <section id="drop" aria-label="Drop files here">
+    <strong>Drop files or folders here</strong>
+    <span class="muted" id="limit"></span>
+    <div class="buttons">
+      <button type="button" id="pick">Choose files</button>
+      <button type="button" class="secondary" id="pick-folder">Choose a folder</button>
+    </div>
+    <input type="file" id="file-input" multiple>
+    <input type="file" id="folder-input" webkitdirectory multiple>
+  </section>
+
+  <div class="bar-row">
+    <div class="overall">
+      <div><span id="state">Checking…</span> <span class="muted" id="summary"></span></div>
+      <div class="meter" id="overall-meter"><span></span></div>
+    </div>
+    <button type="button" class="secondary" id="process">Process now</button>
+  </div>
+
+  <h2>Files</h2>
+  <ul id="files" aria-live="polite"></ul>
+
+  <h2>Live log</h2>
+  <pre id="log" aria-live="polite"></pre>
+</main>
+
+<script>
+(() => {
+  "use strict"
+  const BOOT = __WIKI_BOOT__
+  const TOKEN = BOOT.token
+  const SITE = BOOT.site || ""    // the wiki itself is another origin (another port)
+  document.getElementById("back").href = SITE + "/"
+  let maxBytes = 500 * 1048576
+  try {
+    const saved = localStorage.getItem("theme")
+    if (saved === "dark" || saved === "light") document.documentElement.setAttribute("data-theme", saved)
+  } catch (_) {}
+  document.title = "Upload & Logs · " + BOOT.title
+
+  const $ = (id) => document.getElementById(id)
+  const filesEl = $("files"), logEl = $("log")
+  const rows = new Map()          // queue path (or temporary upload id) -> row state
+  const order = []
+  let uploading = 0
+  let currentRun = ""
+  // Events written before this page opened are history: shown dimmed, above a divider.
+  const openedAt = Date.now() - 2000
+  let dividerShown = false
+
+  // Stages a file walks through. Upload is real bytes; the rest are honest steps, not a guess.
+  const DOC_STEPS = ["Uploading", "Queued", "Converting", "Reading", "Filed"]
+  const PACKET_STEPS = ["Uploading", "Queued", "Reading", "Applied"]
+  const FINAL = { filed: "ok", applied: "ok", parked: "warn", retry: "warn", skipped: "muted", failed: "bad", duplicate: "muted" }
+
+  const base = (p) => (p || "").split("/").pop()
+  const fmtSize = (n) => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(0) + " KB" : (n / 1048576).toFixed(1) + " MB"
+  const pageUrl = (p) => SITE + "/" + p.replace(/^wiki\//, "").replace(/\.md$/, "").replace(/(^|\/)index$/, "$1")
+    .split("/").map((s) => encodeURIComponent(s.replace(/ /g, "-"))).join("/")
+  const rawUrl = (p) => SITE + "/" + p.split("/").map(encodeURIComponent).join("/")
+  const isPacketPath = (p) => (p || "").startsWith("raw/inbox/") || (p || "").startsWith("archive/inbox/")
+
+  function row(key, name) {
+    let r = rows.get(key)
+    if (!r) {
+      r = { key, name: name || base(key), size: 0, stage: "Queued", step: 1, pct: 0, kind: isPacketPath(key) ? "packet" : "doc",
+            final: "", pages: [], to: "", note: "" }
+      rows.set(key, r)
+      order.unshift(key)
+    }
+    return r
+  }
+  function rekey(oldKey, newKey) {
+    const r = rows.get(oldKey)
+    if (!r || oldKey === newKey) return r
+    rows.delete(oldKey)
+    if (rows.has(newKey)) { const i = order.indexOf(oldKey); if (i >= 0) order.splice(i, 1); return rows.get(newKey) }
+    r.key = newKey
+    r.kind = isPacketPath(newKey) ? "packet" : "doc"
+    rows.set(newKey, r)
+    order[order.indexOf(oldKey)] = newKey
+    return r
+  }
+  function advance(r, stage) {
+    if (r.final && stage !== "Filed" && stage !== "Applied") return
+    const steps = r.kind === "packet" ? PACKET_STEPS : DOC_STEPS
+    const i = steps.indexOf(stage)
+    if (i >= 0 && i >= r.step) { r.step = i; r.stage = stage }
+  }
+  function finish(r, final, label) {
+    r.final = final
+    r.stage = label
+    if (final === "filed" || final === "applied") r.step = (r.kind === "packet" ? PACKET_STEPS : DOC_STEPS).length - 1
+  }
+
+  // ------------------------------------------------------------------ render
+  let renderQueued = false
+  function render() {
+    if (renderQueued) return
+    renderQueued = true
+    requestAnimationFrame(() => {
+      renderQueued = false
+      filesEl.textContent = ""
+      let total = 0, done = 0, score = 0
+      for (const key of order.slice(0, 200)) {
+        const r = rows.get(key)
+        if (!r) continue
+        const steps = r.kind === "packet" ? PACKET_STEPS : DOC_STEPS
+        const li = document.createElement("li")
+        const head = document.createElement("div"); head.className = "file-head"
+        const nm = document.createElement("span"); nm.className = "file-name"; nm.textContent = r.name
+        const st = document.createElement("span"); st.className = "stage " + (FINAL[r.final] || "")
+        st.textContent = r.stage + (r.step === 0 && !r.final ? " " + r.pct + "%" : "")
+        head.append(nm, st)
+        const bar = document.createElement("div")
+        bar.className = "steps" + (r.final ? " " + ({ ok: "done", warn: "warn", bad: "bad" }[FINAL[r.final]] || "") : "")
+        steps.forEach((_, i) => {
+          const s = document.createElement("span")
+          if (i === 0) {
+            s.className = "upl" + (r.step > 0 || r.final ? " on" : "")
+            const fill = document.createElement("i"); fill.style.width = (r.step > 0 || r.final ? 100 : r.pct) + "%"
+            s.append(fill)
+          } else if (i <= r.step && !(r.final === "skipped" || r.final === "duplicate" || r.final === "failed")) s.className = "on"
+          bar.append(s)
+        })
+        li.append(head, bar)
+        const det = document.createElement("div"); det.className = "detail"
+        if (r.size) det.append(fmtSize(r.size) + "  ")
+        if (r.note) det.append(r.note + "  ")
+        if (r.to) {
+          const a = document.createElement("a"); a.href = rawUrl(r.to); a.textContent = "original"; a.target = "_blank"
+          det.append(a)
+        }
+        for (const p of r.pages.slice(0, 8)) {
+          const a = document.createElement("a"); a.href = pageUrl(p); a.textContent = base(p).replace(/\.md$/, "")
+          det.append(a)
+        }
+        if (det.childNodes.length) li.append(det)
+        filesEl.append(li)
+        if (r.final !== "skipped" && r.final !== "duplicate") {
+          total++
+          if (r.final) done++
+          score += r.final ? 1 : (r.step === 0 ? r.pct / 100 * 0.2 : r.step / (steps.length - 1))
+        }
+      }
+      const meter = $("overall-meter")
+      const pct = total ? Math.round((score / total) * 100) : 0
+      meter.firstElementChild.style.width = pct + "%"
+      meter.className = "meter" + (total && done === total ? " done" : "")
+      $("summary").textContent = total ? `${done} of ${total} done · ${pct}%` : ""
+    })
+  }
+
+  // ------------------------------------------------------------------ log
+  function logLine(t, text, cls) {
+    const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 8
+    const old = t && new Date(t).getTime() < openedAt
+    if (!old && !dividerShown && logEl.childNodes.length) {
+      const d = document.createElement("div"); d.className = "divider"; d.textContent = "Earlier activity above · live from here"
+      logEl.append(d)
+    }
+    if (!old) dividerShown = true
+    const line = document.createElement("div")
+    if (old) line.className = "old"
+    const ts = document.createElement("span"); ts.className = "t"
+    ts.textContent = (t ? t.slice(11, 19) : new Date().toTimeString().slice(0, 8)) + "  "
+    const msg = document.createElement("span"); if (cls) msg.className = cls; msg.textContent = text
+    line.append(ts, msg)
+    logEl.append(line)
+    while (logEl.childNodes.length > 2000) logEl.firstChild.remove()
+    if (atBottom) logEl.scrollTop = logEl.scrollHeight
+  }
+
+  const seenFinal = new Set()
+  function onEvent(e) {
+    const f = e.file || ""
+    const n = base(f)
+    switch (e.type) {
+      case "upload": {
+        // A duplicate names the copy already queued: leave that row's progress alone.
+        if (e.duplicate) { logLine(e.t, `${e.name ? base(e.name) : n}: the same file is already queued`, "warn"); break }
+        const r = row(f, e.name ? base(e.name) : n)
+        r.size = e.bytes || r.size
+        advance(r, "Queued"); logLine(e.t, `Uploaded ${r.name} (${fmtSize(e.bytes || 0)})`)
+        break
+      }
+      case "waiting": logLine(e.t, "Waiting for files to finish copying…"); break
+      case "run-start":
+        currentRun = e.run || ""
+        logLine(e.t, `Started: ${e.docs || 0} document(s), ${e.packets || 0} packet(s)`); break
+      case "queued": { const r = row(f); if (!r.final) advance(r, "Queued"); break }
+      case "routed": { rekey(f, e.to); logLine(e.t, `Moved ${n} to the ${isPacketPath(e.to) ? "packet" : "document"} queue`); break }
+      case "convert": { advance(row(f), "Converting"); logLine(e.t, `Converting ${n} to text`); break }
+      case "claude-start":
+        logLine(e.t, e.label === "intake" ? "Claude is reading the documents"
+          : e.label && e.label.startsWith("ingest") ? "Claude is applying the Update Packets"
+          : e.label === "local" ? "The model on this Mac is reading (nothing leaves the Mac)"
+          : "Reading (" + (e.label || "engine") + ")"); break
+      case "read": { advance(row(f), "Reading"); logLine(e.t, `Reading ${n}`); break }
+      case "page": {
+        if (f) { const r = row(f); if (!r.pages.includes(e.page)) r.pages.push(e.page) }
+        logLine(e.t, `${e.action === "created" ? "Created" : "Updated"} page ${e.page.replace(/^wiki\//, "")}`); break
+      }
+      case "review": logLine(e.t, `Noted something for review${n ? " (" + n + ")" : ""}`, "warn"); break
+      case "filed": case "applied": {
+        const r = row(f)
+        r.to = e.to || r.to
+        finish(r, e.type, e.type === "filed" ? "Filed" : "Applied")
+        if (!seenFinal.has(e.type + f)) {
+          seenFinal.add(e.type + f)
+          logLine(e.t, e.type === "filed" ? `Filed ${n} → ${(e.to || "").split("/").slice(0, -1).join("/")}` : `Applied packet ${n}`, "ok")
+        }
+        break
+      }
+      case "parked": {
+        const r = row(f); r.to = e.to || ""
+        finish(r, "parked", "Needs review")
+        r.note = "Could not be processed; see the Review queue"
+        logLine(e.t, `${n} could not be processed after ${e.attempts || 2} tries; moved to needs-review`, "warn"); break
+      }
+      case "retry": {
+        const r = row(f); r.note = "Not finished; it will be tried again"
+        if (!r.final) r.stage = "Will retry"
+        logLine(e.t, `${n} is not finished yet; it will be tried again`, "warn"); break
+      }
+      case "claude-end":
+        if (e.ok && e.label === "local") logLine(e.t, `Finished reading (${e.turns || 0} questions to the model, ${e.detail || ""})`)
+        else if (e.ok) logLine(e.t, `Finished reading (${e.turns || 0} steps${e.cost != null ? ", $" + Number(e.cost).toFixed(2) : ""})`)
+        else logLine(e.t, `Reading stopped (${e.detail || "error"})`, "bad")
+        break
+      case "committed": logLine(e.t, "Saved a version of the wiki"); break
+      case "build-start": logLine(e.t, "Updating the website…"); break
+      case "build-done": logLine(e.t, "Website updated. Refresh the wiki to see the changes.", "ok"); break
+      case "build-failed": logLine(e.t, "The website could not be rebuilt; the previous version is still shown", "bad"); break
+      case "run-end": logLine(e.t, `Done: ${e.docs || 0} document(s), ${e.packets || 0} packet(s)`, "ok"); break
+      case "rerun": logLine(e.t, `${e.count || "More"} file(s) arrived meanwhile; starting again`); break
+      case "error": logLine(e.t, "Problem: " + (e.msg || "unknown"), "bad"); break
+      case "process-requested": logLine(e.t, "Process now pressed"); break
+      default: if (e.msg) logLine(e.t, e.msg)
+    }
+    render()
+  }
+
+  // ------------------------------------------------------------------ live stream
+  // The viewer issues a new token each time it starts (an engine update restarts it).
+  // A page holding an old one reloads once to pick up the new one.
+  function reloadForNewToken() {
+    let last = 0
+    try { last = Number(sessionStorage.getItem("upload-reload") || 0) } catch (_) {}
+    if (Date.now() - last < 30000) return
+    try { sessionStorage.setItem("upload-reload", String(Date.now())) } catch (_) {}
+    if (!uploading && !queue.length) location.reload()
+  }
+
+  function connect() {
+    const es = new EventSource("/api/events?token=" + encodeURIComponent(TOKEN))
+    es.onmessage = (m) => { try { onEvent(JSON.parse(m.data)) } catch (_) {} }
+    es.onerror = () => { if (es.readyState === EventSource.CLOSED) reloadForNewToken() }
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch("/api/status?token=" + encodeURIComponent(TOKEN), { cache: "no-store" })
+      if (r.status === 403) reloadForNewToken()
+      if (r.ok) {
+        const s = await r.json()
+        const st = $("state")
+        const waiting = s.queue.intake.length + s.queue.inbox.length
+        if (s.runner.running) { st.className = "busy"; st.textContent = "Working" + (s.runner.since ? " since " + s.runner.since : "") }
+        else if (waiting) { st.className = "busy"; st.textContent = `${waiting} file(s) waiting to start` }
+        else { st.className = "idle"; st.textContent = "Idle" }
+        $("process").disabled = s.runner.running || !waiting
+        $("limit").textContent = `Up to ${s.maxUploadMb} MB per file.`
+        maxBytes = s.maxUploadMb * 1048576
+        for (const p of [...s.queue.intake, ...s.queue.inbox]) row(p)  // also files added outside this page
+        render()
+      }
+    } catch (_) {}
+    setTimeout(poll, 4000)
+  }
+
+  // ------------------------------------------------------------------ uploads
+  const queue = []
+  let tempId = 0
+  function enqueue(file, relPath) {
+    const name = relPath || file.name
+    // Hidden files and folders (.DS_Store, .git, .Spotlight-V100) are never documents.
+    if (name.split("/").some((seg) => seg.startsWith("."))) return
+    const key = "upload:" + (++tempId)
+    const r = row(key, base(name))
+    r.size = file.size
+    if (file.size > maxBytes) {
+      finish(r, "skipped", "Skipped")
+      r.note = `Larger than the ${Math.round(maxBytes / 1048576)} MB limit`
+      render()
+      return
+    }
+    r.stage = "Uploading"
+    r.step = 0
+    queue.push({ file, name, key })
+    pump()
+    render()
+  }
+  function pump() {
+    while (uploading < 2 && queue.length) send(queue.shift())
+  }
+  function send({ file, name, key }) {
+    uploading++
+    const xhr = new XMLHttpRequest()
+    xhr.open("POST", "/api/upload?name=" + encodeURIComponent(name))
+    xhr.setRequestHeader("X-Wiki-Token", TOKEN)
+    xhr.upload.onprogress = (ev) => {
+      if (ev.lengthComputable) { const r = rows.get(key); if (r) { r.pct = Math.round((ev.loaded / ev.total) * 100); render() } }
+    }
+    xhr.onloadend = () => {
+      uploading--
+      let res = {}
+      try { res = JSON.parse(xhr.responseText || "{}") } catch (_) {}
+      const r = rows.get(key)
+      if (xhr.status === 200 && res.ok) {
+        const merged = rekey(key, res.file)
+        if (merged && !merged.final) advance(merged, "Queued")
+        if (res.duplicate && merged && merged.key === res.file) {
+          // Nothing new was queued; the row now tracks the copy that already was.
+          merged.note = "The same file was already queued"
+        }
+      } else if (r) {
+        if (res.skipped) { finish(r, "skipped", "Skipped"); r.note = "Skipped: " + res.skipped }
+        else { finish(r, "failed", "Upload failed"); r.note = res.error || (xhr.status ? "Error " + xhr.status : "Connection lost") }
+        logLine(null, `${r.name}: ${r.note}`, res.skipped ? "warn" : "bad")
+      }
+      render()
+      pump()
+    }
+    xhr.send(file)
+  }
+
+  async function walk(entry, prefix, out) {
+    if (entry.isFile) {
+      await new Promise((ok) => entry.file((f) => { out.push([f, prefix + f.name]); ok() }, ok))
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader()
+      for (;;) {
+        const batch = await new Promise((ok) => reader.readEntries(ok, () => ok([])))
+        if (!batch.length) break
+        for (const child of batch) await walk(child, prefix + entry.name + "/", out)
+      }
+    }
+  }
+
+  const drop = $("drop")
+  ;["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over") }))
+  ;["dragleave", "drop"].forEach((t) => drop.addEventListener(t, () => drop.classList.remove("over")))
+  // A file dropped anywhere else on the page must not make the browser open it.
+  window.addEventListener("dragover", (e) => e.preventDefault())
+  window.addEventListener("drop", (e) => e.preventDefault())
+  drop.addEventListener("drop", async (e) => {
+    e.preventDefault()
+    const items = [...(e.dataTransfer.items || [])]
+    const entries = items.map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean)
+    if (entries.length) {
+      const found = []
+      for (const en of entries) await walk(en, "", found)
+      found.forEach(([f, p]) => enqueue(f, p))
+    } else {
+      [...e.dataTransfer.files].forEach((f) => enqueue(f))
+    }
+  })
+  $("pick").onclick = () => $("file-input").click()
+  $("pick-folder").onclick = () => $("folder-input").click()
+  $("file-input").onchange = (e) => { [...e.target.files].forEach((f) => enqueue(f)); e.target.value = "" }
+  $("folder-input").onchange = (e) => { [...e.target.files].forEach((f) => enqueue(f, f.webkitRelativePath)); e.target.value = "" }
+  $("process").onclick = async () => {
+    $("process").disabled = true
+    try {
+      await fetch("/api/process", { method: "POST", headers: { "X-Wiki-Token": TOKEN } })
+    } catch (_) {}
+  }
+  window.addEventListener("beforeunload", (e) => { if (uploading || queue.length) { e.preventDefault(); e.returnValue = "" } })
+
+  connect()
+  poll()
+  render()
+})()
+</script>
+</body>
+</html>

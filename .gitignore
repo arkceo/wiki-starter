@@ -3,7 +3,7 @@
 Icon?
 
 # Source documents stay on disk, out of git (back them up with Time Machine).
-# Only the two drop folders' placeholders are tracked.
+# Only the two queue folders' placeholders are tracked.
 raw/*
 !raw/inbox/
 !raw/_intake/

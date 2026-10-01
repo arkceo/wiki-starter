@@ -21,7 +21,8 @@ const explorer = () =>
 // components shared across all pages
 export const sharedPageComponents: SharedLayout = {
   head: Component.Head(),
-  header: [],
+  // "Upload", top right: opens the Upload & Logs page served by the local viewer.
+  header: [Component.UploadButton()],
   // No repoUrl: this wiki has no remote. Source links open through the local viewer.
   afterBody: [Component.Sources()],
   footer: Component.Footer({ links: {} }),

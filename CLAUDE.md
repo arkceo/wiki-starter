@@ -29,8 +29,8 @@ they conflict with this file, the house rules win.
 
 ```
 raw/
-  inbox/                 # Update Packets land here (the "Wiki Inbox" folder)
-  _intake/               # documents land here (the "Wiki Intake" folder)
+  inbox/                 # Update Packets land here (from the Upload page)
+  _intake/               # documents land here (from the Upload page)
   <project>/             # filed sources, one folder per project
 wiki/
   index.md               # home page of the local site
@@ -41,6 +41,8 @@ wiki/
   how-it-runs/           # operating model, SOPs, how this wiki works
   products/              # products and services
   decisions/             # decisions, one file each
+  sources/               # one summary page per filed document (written by the local model)
+  updates/               # one page per Update Packet (written by the local model)
   _review.md             # questions for a human (see below)
 generated/
   _templates/            # update-packet.md, project-claude.md

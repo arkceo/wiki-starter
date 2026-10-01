@@ -2,5 +2,6 @@
   "title": "My Wiki",
   "company": "",
   "port": 8765,
+  "engine": "claude",
   "maxSpendPerRunUsd": 5
 }

@@ -7,20 +7,23 @@
 #   1. checks this is a Mac you can administer;
 #   2. installs Homebrew (asks for your Mac password once), then git, Node, Python and
 #      the OCR tools (ocrmypdf, Tesseract, Ghostscript);
-#   3. installs Claude Code and stores your Anthropic sign-in in the macOS Keychain;
+#   3. asks who should read your documents: Claude (needs an Anthropic sign-in, stored in
+#      the macOS Keychain) or a model that runs on this Mac (nothing leaves it, no
+#      account; a one-off download of a few GB);
 #   4. downloads the wiki engine into ~/Wiki/<name> and sets up its local history (git,
 #      on this Mac only);
-#   5. starts two background agents: the runner (processes what you drop in) and the
-#      viewer (the wiki site at http://127.0.0.1:8765, visible only to this Mac);
-#   6. puts Wiki Inbox, Wiki Intake and Open Wiki on your Desktop;
+#   5. starts two background agents: the runner (processes what you upload) and the
+#      viewer (the wiki site and its Upload page at http://127.0.0.1:8765, visible only
+#      to this Mac);
+#   6. puts Open Wiki on your Desktop;
 #   7. processes a welcome note as a test and opens the wiki.
 #
-# Nothing is published. The only account involved is Anthropic's. Logs (no secrets):
-# ~/Library/Logs/wiki-starter/install.log
+# Nothing is published. The only account involved is Anthropic's, and none at all with the
+# local model. Logs (no secrets): ~/Library/Logs/wiki-starter/install.log
 #
 # Answers can be given as environment variables instead of prompts:
-#   WIKI_TITLE, WIKI_COMPANY, WIKI_AUTH (subscription|apikey|skip), WIKI_API_KEY,
-#   WIKI_OAUTH_TOKEN, WIKI_SKIP_SMOKE_TEST=1
+#   WIKI_TITLE, WIKI_COMPANY, WIKI_ENGINE (claude|local), WIKI_AUTH
+#   (subscription|apikey|skip), WIKI_API_KEY, WIKI_OAUTH_TOKEN, WIKI_SKIP_SMOKE_TEST=1
 
 set -u
 
@@ -33,6 +36,15 @@ LOG_DIR="$HOME/Library/Logs/wiki-starter"
 LOG_FILE="$LOG_DIR/install.log"
 AGENT_DIR="$HOME/Library/LaunchAgents"
 AGENT_PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+# The local model ("This Mac only"), picked by a side-by-side test on sample documents.
+# The hash is Hugging Face's own sha256 for this exact file; change all four together.
+LOCAL_MODEL_REPO="${WIKI_LOCAL_MODEL_REPO:-bartowski/Qwen_Qwen3.5-9B-GGUF}"
+LOCAL_MODEL_FILE="${WIKI_LOCAL_MODEL_FILE:-Qwen_Qwen3.5-9B-Q4_K_M.gguf}"
+LOCAL_MODEL_SHA256="${WIKI_LOCAL_MODEL_SHA256:-d784ce9eda1a5a7b51e8f705a9e6310844bf4f173654d115823c775fdea56d43}"
+LOCAL_MODEL_GB="6.2"
+MODEL_DIR="$HOME/Library/Application Support/wiki-starter/models"
+ENGINE_CHOICE=""
 
 mkdir -p "$LOG_DIR"
 
@@ -130,6 +142,33 @@ questions() {
   ok "the wiki will live in $WIKI_DIR"
 }
 
+choose_engine() {
+  local current="" choice="${WIKI_ENGINE:-}" mem_gb
+  [ -f "$WIKI_DIR/wiki.config.json" ] \
+    && current=$(sed -n 's/.*"engine": *"\([a-z]*\)".*/\1/p' "$WIKI_DIR/wiki.config.json" | head -1)
+  case "$choice" in claude) choice=1 ;; local) choice=2 ;; esac
+  info "Who should read your documents?"
+  info "  1) Claude (recommended): the richest wiki, with pages written and cross-linked"
+  info "     like a careful assistant would. Needs an Anthropic sign-in; the text Claude"
+  info "     reads is sent to Anthropic."
+  info "  2) This Mac only: a model runs on this Mac. Nothing leaves it and no account is"
+  info "     needed. The wiki is plainer, and a one-off download of about $LOCAL_MODEL_GB GB."
+  ask choice "Choose 1 or 2" "$([ "$current" = local ] && echo 2 || echo 1)"
+  case "$choice" in
+    1) ENGINE_CHOICE=claude ;;
+    2) ENGINE_CHOICE=local ;;
+    *) die "Please choose 1 or 2." ;;
+  esac
+  if [ "$ENGINE_CHOICE" = local ]; then
+    mem_gb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))
+    if [ "$mem_gb" -gt 0 ] && [ "$mem_gb" -lt 16 ]; then
+      warn "this Mac has $mem_gb GB of memory; the local model needs 16 GB to run well"
+    fi
+    [ "$(uname -m)" = arm64 ] || warn "on an Intel Mac the local model is very slow; Claude is the better choice"
+  fi
+  ok "documents will be read by $([ "$ENGINE_CHOICE" = local ] && echo "a model on this Mac" || echo Claude)"
+}
+
 # ------------------------------------------------------------------ 3 tools ----
 install_tools() {
   step "3/7  Installing tools (a few minutes the first time)"
@@ -156,8 +195,9 @@ install_tools() {
   fi
   ok "Homebrew"
 
-  local pkg missing=""
-  for pkg in git node python@3.12 ocrmypdf; do
+  local pkg missing="" pkgs="git node python@3.12 ocrmypdf"
+  [ "$ENGINE_CHOICE" = local ] && pkgs="$pkgs llama.cpp"
+  for pkg in $pkgs; do
     "$brew" list --formula "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"
   done
   if [ -n "$missing" ]; then
@@ -165,8 +205,10 @@ install_tools() {
     # shellcheck disable=SC2086
     HOMEBREW_NO_AUTO_UPDATE=1 "$brew" install $missing >> "$LOG_FILE" 2>&1 || die "Could not install:$missing"
   fi
-  ok "git, Node, Python 3.12, OCR tools"
+  ok "git, Node, Python 3.12, OCR tools$([ "$ENGINE_CHOICE" = local ] && echo ", llama.cpp")"
 
+  # The local model needs no Claude Code (and no account).
+  [ "$ENGINE_CHOICE" = local ] && return 0
   if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ]; then
     info "installing Claude Code"
     curl -fsSL https://claude.ai/install.sh | bash >> "$LOG_FILE" 2>&1 || die "Claude Code did not install."
@@ -271,6 +313,57 @@ PYEOF
     bash scripts/wiki_runner.sh --rebuild >> "$LOG_FILE" 2>&1 || warn "the first site build failed; see $LOG_DIR/runner.log"
   fi
   [ -f public/index.html ] && ok "site built"
+}
+
+# The engine is recorded only once step 5 has succeeded: a background run that started
+# while the model was still downloading would otherwise find no model and fail.
+set_engine() { # claude|local
+  WIKI_ENGINE_V="$1" .venv/bin/python - <<'PYEOF' || die "Could not write wiki.config.json."
+import json, os
+cfg = json.load(open("wiki.config.json"))
+cfg["engine"] = os.environ["WIKI_ENGINE_V"]
+json.dump(cfg, open("wiki.config.json", "w"), indent=2)
+open("wiki.config.json", "a").write("\n")
+PYEOF
+}
+
+# ------------------------------------------------------------ 5 local model ----
+sha256_of() { shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1; }
+
+local_model_setup() {
+  step "5/7  The model on this Mac"
+  local path="$MODEL_DIR/$LOCAL_MODEL_FILE"
+  mkdir -p "$MODEL_DIR"
+  if [ -f "$path" ] && [ "$(sha256_of "$path")" = "$LOCAL_MODEL_SHA256" ]; then
+    ok "model already downloaded ($LOCAL_MODEL_FILE)"
+  else
+    info "downloading $LOCAL_MODEL_FILE (about $LOCAL_MODEL_GB GB) from Hugging Face."
+    info "This takes a while; if it stops, run the installer again and it resumes."
+    curl -fL -C - --retry 5 --retry-delay 5 --progress-bar -o "$path.part" \
+      "https://huggingface.co/$LOCAL_MODEL_REPO/resolve/main/$LOCAL_MODEL_FILE" \
+      || die "The model download stopped. Run the installer again to resume it."
+    info "checking the download"
+    if [ "$(sha256_of "$path.part")" != "$LOCAL_MODEL_SHA256" ]; then
+      rm -f "$path.part"
+      die "The downloaded model does not match its published checksum. Run the installer again."
+    fi
+    mv "$path.part" "$path"
+    ok "model downloaded and verified"
+  fi
+  WIKI_MODEL_V="$path" .venv/bin/python - <<'PYEOF' || die "Could not write wiki.config.json."
+import json, os
+cfg = json.load(open("wiki.config.json"))
+lm = cfg.get("localModel") or {}
+lm["file"] = os.environ["WIKI_MODEL_V"]
+lm.setdefault("ctx", 32768)
+cfg["localModel"] = lm
+json.dump(cfg, open("wiki.config.json", "w"), indent=2)
+open("wiki.config.json", "a").write("\n")
+PYEOF
+  info "starting the model once to check it works (up to a minute)"
+  .venv/bin/python scripts/local_engine.py check >> "$LOG_FILE" 2>&1 \
+    || die "The local model did not start. Details are in $LOG_FILE and $LOG_DIR/runner.log."
+  ok "the model answers, on this Mac only"
 }
 
 # ------------------------------------------------------------ 5 anthropic ------
@@ -388,7 +481,7 @@ install_agents() {
   <key>ThrottleInterval</key><integer>30</integer>
   <key>ProcessType</key><string>Background</string>"
   load_agent "$AGENT_DIR/$runner.plist" "$runner"
-  ok "runner: processes Wiki Inbox and Wiki Intake"
+  ok "runner: processes everything you upload"
 
   write_plist "$AGENT_DIR/$viewer.plist" "$viewer" \
 "    <string>$d/.venv/bin/python</string>
@@ -397,20 +490,32 @@ install_agents() {
   load_agent "$AGENT_DIR/$viewer.plist" "$viewer"
   ok "viewer: http://127.0.0.1:$PORT (this Mac only)"
 
-  # Desktop shortcuts. Plain symlinks: no Finder automation prompt.
-  local desk="$HOME/Desktop" inbox="Wiki Inbox" intake="Wiki Intake" opener="Open Wiki.webloc"
+  # Desktop: Open Wiki only. Documents and notes go in through the Upload page.
+  local desk="$HOME/Desktop" opener="Open Wiki.webloc"
   mkdir -p "$desk"
-  if [ -e "$desk/$inbox" ] && [ "$(readlink "$desk/$inbox")" != "$WIKI_DIR/raw/inbox" ]; then
-    inbox="$WIKI_TITLE_SHOWN Inbox"; intake="$WIKI_TITLE_SHOWN Intake"; opener="Open $WIKI_TITLE_SHOWN.webloc"
+  remove_old_drop_links "$desk"
+  if [ -e "$desk/$opener" ] && ! grep -q "127.0.0.1:$PORT/" "$desk/$opener" 2>/dev/null; then
+    opener="Open $WIKI_TITLE_SHOWN.webloc"  # another wiki on this Mac already has the name
   fi
-  ln -sfn "$WIKI_DIR/raw/inbox" "$desk/$inbox"
-  ln -sfn "$WIKI_DIR/raw/_intake" "$desk/$intake"
   cat > "$desk/$opener" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>URL</key><string>http://127.0.0.1:$PORT/</string></dict></plist>
 EOF
-  ok "Desktop: $inbox, $intake, ${opener%.webloc}"
+  ok "Desktop: ${opener%.webloc} (add documents with Upload, top right of the wiki)"
+}
+
+# Earlier versions put two folder shortcuts (Wiki Inbox, Wiki Intake) on the Desktop.
+# Remove a Desktop item only when it is a link into this wiki's queue folders.
+remove_old_drop_links() { # desktop-dir
+  local item target
+  for item in "$1"/*; do
+    [ -L "$item" ] || continue
+    target=$(readlink "$item")
+    case "$target" in
+      "$WIKI_DIR/raw/inbox"|"$WIKI_DIR/raw/_intake") rm -f "$item" && log "removed old Desktop link $item" ;;
+    esac
+  done
 }
 
 # ------------------------------------------------------------ 7 first run ------
@@ -418,7 +523,7 @@ first_run() {
   step "7/7  First test"
   if [ -n "${WIKI_SKIP_SMOKE_TEST:-}" ] || [ -n "$(ls archive/inbox/*.md 2>/dev/null)" ]; then
     ok "test skipped"
-  elif ! keychain_has claude-oauth-token && ! keychain_has anthropic-api-key; then
+  elif [ "$ENGINE_CHOICE" != local ] && ! keychain_has claude-oauth-token && ! keychain_has anthropic-api-key; then
     warn "test skipped: no Anthropic sign-in stored"
   else
     local today packet waited=0
@@ -427,7 +532,7 @@ first_run() {
     sed -e "s/WELCOME_DATE/$today/g" -e "s/WELCOME_PORT/$PORT/g" \
         -e "s/WELCOME_COMPANY/$(printf '%s' "${WIKI_COMPANY:-this business}" | sed 's/[&/\]/\\&/g')/g" \
         engine/welcome-packet.md > "$packet"
-    info "dropped a welcome note into Wiki Inbox; waiting for the runner (up to 5 minutes)"
+    info "queued a welcome note; waiting for the runner (up to 5 minutes)"
     while [ -f "$packet" ] && [ "$waited" -lt 300 ]; do sleep 10; waited=$((waited + 10)); printf '.'; done
     printf '\n'
     if [ ! -f "$packet" ]; then
@@ -458,9 +563,11 @@ main() {
   preflight
   questions
   WIKI_TITLE_SHOWN="${WIKI_TITLE:-$SLUG}"
+  choose_engine
   install_tools
   install_engine
-  anthropic_signin
+  if [ "$ENGINE_CHOICE" = local ]; then local_model_setup; else anthropic_signin; fi
+  set_engine "$ENGINE_CHOICE"
   install_agents
   first_run
 
@@ -468,10 +575,14 @@ main() {
   bold "Done."
   info "Wiki folder:   $WIKI_DIR"
   info "Read it:       http://127.0.0.1:$PORT  (Open Wiki on the Desktop)"
-  info "Add documents: drop them into Wiki Intake on the Desktop"
-  info "Add notes:     drop Update Packets into Wiki Inbox on the Desktop"
+  info "Add documents: click Upload, top right of the wiki, and drop files on it"
+  info "Add notes:     upload Update Packets the same way"
   info "Your rules:    edit HOUSE-RULES.md in the wiki folder"
-  info "Ask questions: open the wiki folder in Claude (desktop app or 'claude' in Terminal)"
+  if [ "$ENGINE_CHOICE" = local ]; then
+    info "Reading:       a model on this Mac; nothing leaves it"
+  else
+    info "Ask questions: open the wiki folder in Claude (desktop app or 'claude' in Terminal)"
+  fi
   info "Turn on Time Machine: your documents are not kept anywhere else."
   printf '\n'
 }

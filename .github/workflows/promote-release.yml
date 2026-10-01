@@ -1,0 +1,61 @@
+# Promote release: make a published release the public main, without a merge.
+#
+# Releases are prepared elsewhere and pushed to a review branch as a fast-forward of
+# main. This checks that the branch is exactly that (main's history untouched, every new
+# commit authored and committed by wiki-starter), then moves main to it. Moving a branch
+# adds no commit, so the public history names no person. The release is tagged with a
+# lightweight tag (which records no one) and the review branch is deleted.
+#
+# A branch that fails a check is left as it is and main does not move. The log never
+# prints the identity that failed the check: this repository is public.
+name: Promote release
+
+on:
+  push:
+    branches: ["claude/**", "release/**"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promote-release
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the release and move main to it
+        env:
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main --tags
+          if ! git merge-base --is-ancestor origin/main "$SHA"; then
+            echo "::error::$BRANCH is not a fast-forward of main. Nothing was promoted."
+            exit 1
+          fi
+          if [ "$(git rev-parse origin/main)" != "$SHA" ]; then
+            ident='wiki-starter <wiki-starter@users.noreply.github.com>'
+            others=$(git log --format='%an <%ae>%n%cn <%ce>' "origin/main..$SHA" | sort -u | grep -vxF "$ident" || true)
+            if [ -n "$others" ]; then
+              echo "::error::$BRANCH has commits by someone other than wiki-starter. Nothing was promoted."
+              exit 1
+            fi
+            git push origin "$SHA:refs/heads/main"
+            echo "main is now $SHA"
+          else
+            echo "main is already at $SHA"
+          fi
+          version=$(git show "$SHA:.wiki-engine/VERSION" 2>/dev/null | tr -d '[:space:]' || true)
+          if [ -n "$version" ] && ! git rev-parse -q --verify "refs/tags/$version" >/dev/null; then
+            git tag "$version" "$SHA"
+            git push origin "refs/tags/$version"
+            echo "tagged $version"
+          fi
+          git push origin --delete "$BRANCH"
