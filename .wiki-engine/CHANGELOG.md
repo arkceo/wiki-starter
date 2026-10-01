@@ -2,6 +2,10 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Full guide in the README
+- The README now holds the whole guide, from install to uninstall, including the
+  troubleshooting table and the uninstall commands.
+
 ## Upload & Logs, and a model on this Mac
 - An **Upload** button at the top right of every page opens the Upload & Logs page: drop
   files or whole folders, watch each one go from uploaded to filed, and follow a live log

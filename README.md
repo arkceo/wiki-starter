@@ -2,52 +2,97 @@
 
 A company wiki that writes itself and lives only on your Mac.
 
-Click **Upload**, drop in documents and notes, and watch the progress live. Claude reads
-them, writes and cross-links the wiki pages, and files the originals. You read the result
-in your browser.
-Nothing is published. The only account you need is Anthropic's, and none at all if you
-choose to have the documents read by a model that runs on the Mac itself.
+Click **Upload**, drop in documents and notes, and watch the progress live. Claude, or a
+model that runs on the Mac itself, reads them, writes and cross-links the wiki pages, and
+files the originals. You read the result in your browser. Nothing is published.
+
+## Before you start
+
+- A Mac on macOS 13 (Ventura) or newer, with an **administrator** account that stays
+  logged in. The wiki only works while someone is signed in, so a Mac mini that stays on
+  is ideal.
+- Choose who reads your documents:
+  - **Claude** (recommended): you need a Claude Pro or Max subscription, or an Anthropic
+    API key from console.anthropic.com with a monthly spend limit set.
+  - **This Mac only**: no account is needed, but the Mac must have Apple silicon and
+    **16 GB of memory**.
+- About 3 GB of free disk space (about 9 GB with the model on this Mac), and an internet
+  connection.
+
+**Already installed?** You don't need to reinstall. Double-click **Update Wiki Engine** in
+the wiki folder. For a clean start instead, uninstall first (last section).
 
 ## Install
 
-On the Mac that will hold the wiki (a Mac mini that stays on is ideal), open **Terminal**
-and paste:
+Open **Terminal** (Applications → Utilities), paste this line and press Return:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/arkceo/wiki-starter/main/install.sh | bash
 ```
 
-Step-by-step guide, from install to uninstall:
-[Wiki install guide](https://claude.ai/artifact/EVqBQYt9mZP5v15Bk7T4JE)
+The installer has 7 steps, takes 10–20 minutes the first time, and shows ✓ as each step
+finishes. It asks for:
 
-You will be asked for:
+1. **Your Mac password**, once, to install Homebrew. This is skipped if Homebrew is
+   already installed.
+2. **Company name** and **wiki title**. The title becomes the folder name, so
+   "Company Wiki" becomes `~/Wiki/company-wiki`.
+3. **Who reads your documents:** type **1** for Claude or **2** for This Mac only.
+4. What happens next depends on that choice:
+   - **Claude with a subscription:** a browser window opens. Sign in and approve, then
+     copy the token Terminal shows (it starts with `sk-ant-oat`) and paste it.
+   - **Claude with an API key:** paste the key.
+   - **This Mac only:** there's no sign-in. The installer downloads the model
+     (Qwen3.5-9B, about 6.2 GB; it resumes if interrupted), checks it, and starts it once
+     to make sure it works.
 
-1. your Mac password, once (to install Homebrew and the document tools);
-2. your company name and a title for the wiki;
-3. who should read your documents:
-   - **Claude** (recommended): the richest wiki. Needs an Anthropic sign-in, your Claude
-     subscription (Pro or Max) or an API key.
-   - **This Mac only**: an open model ([Qwen](https://huggingface.co/bartowski/Qwen_Qwen3.5-9B-GGUF))
-     runs on the Mac. Nothing leaves it and no account is needed; the wiki is plainer.
-     Needs 16 GB of memory and a one-off download of about 6.2 GB.
+It finishes by processing a welcome note as a test and opening the wiki in your browser.
+If macOS shows **Background Items Added**, leave it allowed.
 
-That's it. The installer puts **Open Wiki** on your Desktop and opens the wiki.
-Full details, costs and troubleshooting: [INSTALL.md](INSTALL.md).
+**If any step fails, paste the same line again.** Finished steps are skipped.
 
 ## Daily use
 
-| Do this | And this happens |
+- **Read the wiki:** double-click **Open Wiki** on the Desktop, or go to
+  `http://127.0.0.1:8765`.
+- **Add documents or notes:** click **Upload** at the top right of any wiki page. Drop in
+  files, whole folders or Update Packets, or use **Choose files**. Your originals stay
+  where they are.
+- **Watch progress:** the Upload page shows each file moving through uploaded, queued,
+  converting, reading and filed. It also shows an "n of m done" count and a live log. You
+  get a notification when the wiki has been updated.
+- **Process immediately:** press **Process now** on the Upload page.
+- **Ask questions** (Claude only): open the wiki folder in the Claude desktop app, or run
+  `claude` in Terminal inside that folder.
+- **Review queue:** the *Review queue* page lists anything the wiki was unsure about. The
+  model on this Mac only catches obvious contradictions.
+- **Your rules:** edit `HOUSE-RULES.md` in the wiki folder.
+
+**Update Packets** are short notes Claude writes at the end of a working conversation. To
+get them, upload the `skills/packet/` folder (zip it first) to your Claude account as a
+skill, say "wrap up" at the end of a conversation, and upload the file it gives you.
+
+## Updating and switching
+
+- **Update:** double-click **Update Wiki Engine** in the wiki folder. Your pages,
+  documents, house rules and settings are never touched. To undo an update, run
+  `git revert HEAD` in the wiki folder.
+- **Switch between Claude and This Mac only:** paste the install line again and choose
+  the other option. Your wiki stays as it is.
+
+## If something looks stuck
+
+| You see | Do this |
 |---|---|
-| Click **Upload** (top right) and drop PDFs, Word, Excel, PowerPoint, scans or photos | Each is converted to text (OCR for scans), summarised into the right pages, and filed. The page shows every file's progress and a live log |
-| Upload an Update Packet (`.md`) the same way | Its decisions and facts are applied to the affected pages |
-| Double-click **Open Wiki** | The wiki opens at `http://127.0.0.1:8765` |
-| Open the wiki folder in Claude and ask a question | Claude answers from the wiki, with citations |
+| Files stay "Queued" | Open System Settings → General → Login Items & Extensions → *Allow in the Background*, turn **bash** on, then press **Process now**. |
+| The Upload page says "Forbidden" | Reload the page. The wiki restarted, which an update does. |
+| "Claude could not run" | Paste the install line again and replace the sign-in. |
+| "The local model could not run" | Paste the install line again. It checks and repairs the model. |
+| A file was moved to `raw/_needs-review/` | It failed twice. Check that it opens, then upload it again. |
+| No notifications appear | Open System Settings → Notifications → **Script Editor** and allow notifications. |
 
-A notification tells you when the wiki has been updated.
-
-**Update Packets** are short notes Claude writes at the end of a working conversation.
-Upload `skills/packet/` to your Claude account as a skill, say "wrap up" at the end of a
-conversation, and upload the file it gives you.
+Logs are in `~/Library/Logs/wiki-starter/`. Costs, privacy and how the two reading
+options compare are in `INSTALL.md`.
 
 ## What stays where
 
@@ -57,11 +102,44 @@ conversation, and upload the file it gives you.
   this Mac, nothing at all.
 - Version history: a local git history in the wiki folder, never pushed anywhere.
 
-## Updating
+## Uninstall
 
-Double-click **Update Wiki Engine** in the wiki folder. It replaces the engine (scripts,
-site code, prompts) and never touches your pages, documents or `HOUSE-RULES.md`.
+First copy `~/Wiki/<your wiki>/raw/` somewhere safe if you need the documents. Files you
+dragged in with Finder were moved there, so it may hold the only copies.
+
+Then paste the following into Terminal. In the last line, use your own wiki's folder name:
+
+```bash
+# 1. Stop and remove the background processes
+for p in ~/Library/LaunchAgents/local.wiki-starter.*.plist; do
+  launchctl bootout "gui/$(id -u)" "$p" 2>/dev/null; rm -f "$p"
+done
+
+# 2. Remove the Anthropic sign-in (if Claude was used)
+security delete-generic-password -s wiki-starter -a claude-oauth-token 2>/dev/null
+security delete-generic-password -s wiki-starter -a anthropic-api-key 2>/dev/null
+
+# 3. Remove Desktop shortcuts, logs and the local model (if downloaded)
+rm -f ~/Desktop/"Wiki Inbox" ~/Desktop/"Wiki Intake" ~/Desktop/"Open Wiki.webloc"
+rm -rf ~/Library/Logs/wiki-starter
+rm -rf ~/Library/"Application Support"/wiki-starter
+
+# 4. Delete the wiki: pages, history and documents
+rm -rf ~/Wiki/company-wiki
+```
+
+**Optional:** remove the tools the installer added. Only do this if nothing else on the
+Mac uses them:
+
+```sh
+brew uninstall llama.cpp 2>/dev/null
+brew uninstall ocrmypdf python@3.12 node
+rm -rf ~/.local/bin/claude ~/.local/share/claude
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/uninstall.sh)"
+```
+
+If you remove Homebrew, also delete the `brew shellenv` line from `~/.zprofile`.
 
 ## Licence
 
-The site generator is [Quartz](https://quartz.jzhao.xyz/) (MIT, see `LICENSE.txt`).
+The site generator is Quartz (MIT, see `LICENSE.txt`).
