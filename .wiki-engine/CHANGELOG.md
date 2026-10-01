@@ -2,6 +2,19 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Live progress
+- The Upload page has a live line that says what the wiki is doing at this moment: which
+  file, which step (converting, reading a scan, asking the model, writing pages, filing),
+  how long it has taken, and with the model on this Mac, how much of its answer it has
+  written so far.
+- Each file's bar now shows only real stages: upload, convert, read and write, file. A
+  file that is waiting is labelled as waiting, not shown as part-done, and the overall
+  percentage counts only finished files (the lighter part of the bar shows files already
+  converted).
+- macOS should no longer ask whether "Python" may find devices on your local network. The
+  wiki never needed that: it only talks to this Mac. If you allowed it earlier, you can
+  switch it off in System Settings → Privacy & Security → Local Network.
+
 ## Full guide in the README
 - The README now holds the whole guide, from install to uninstall, including the
   troubleshooting table and the uninstall commands.

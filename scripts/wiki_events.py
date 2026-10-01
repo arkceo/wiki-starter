@@ -20,11 +20,20 @@ progress and a live log. Standard library only.
       Actions are reported only once their tool call succeeded. Plain-language lines also
       go to the runner log.
 
-  wiki_events.py convert-stream
+  wiki_events.py convert-stream [--total N]
       Read scripts/to_markdown.py output on stdin, copy it to the runner log, and emit a
-      convert event for each document it starts converting.
+      convert event for each document it starts converting and a converted event when it
+      is done.
+
+  wiki_events.py now PHASE [key=value ...] [key:=json ...]
+      Say what is happening right now (see set_now).
 
 The log rotates at about 5 MB (one previous file is kept).
+
+Next to the log, .wiki-engine/state/now.json holds one record: what the engine is doing
+at this moment (converting a file, OCR, a question to the model, writing a page, ...).
+It is replaced, never appended to, so it can change every second without growing the
+log; the Upload page shows it as its live line.
 """
 import argparse
 import datetime
@@ -35,9 +44,12 @@ import shlex
 import sys
 import time
 
+import wiki_netguard
+
 WIKI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE_DIR = os.path.join(WIKI_DIR, ".wiki-engine", "state")
 EVENTS = os.path.join(STATE_DIR, "events.jsonl")
+NOW = os.path.join(STATE_DIR, "now.json")
 LOG_FILE = os.path.join(
     os.environ.get("WIKI_LOG_DIR") or os.path.expanduser("~/Library/Logs/wiki-starter"), "runner.log"
 )
@@ -67,6 +79,62 @@ def emit(etype, **fields):
                 f.write(line)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
+    return rec
+
+
+def read_now():
+    try:
+        with open(NOW, encoding="utf-8") as f:
+            rec = json.load(f)
+        return rec if isinstance(rec, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_now(rec):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = f"{NOW}.{os.getpid()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(rec, f, ensure_ascii=False)
+    os.replace(tmp, NOW)  # readers see the old record or the new one, never half of one
+    trace = os.environ.get("WIKI_NOW_TRACE")  # for tests and debugging: keep every record
+    if trace:
+        with open(trace, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def set_now(phase, **fields):
+    """Replace the live record: the phase (convert, ocr, load, read, ask, check, write,
+    file, apply, search, think, settle, tidy, commit, build, idle) and plain facts about
+    it (file, detail, n and of, pages, tokens). `since` restarts when the step changes
+    (phase, file or detail), so the elapsed time shown is the time spent on this step."""
+    prev = read_now()
+    t = now()
+    rec = {"t": t, "phase": phase}
+    rec.update({k: v for k, v in fields.items() if v not in (None, "")})
+    run = os.environ.get("WIKI_RUN_ID")
+    if run and phase != "idle":
+        rec["run"] = run
+    same = all(prev.get(k) == rec.get(k) for k in ("phase", "file", "detail"))
+    rec["since"] = prev.get("since") if same and prev.get("since") else t
+    try:
+        _write_now(rec)
+    except OSError:
+        pass
+    return rec
+
+
+def update_now(**fields):
+    """Add facts to the current step (tokens so far, pages) without restarting it."""
+    rec = read_now()
+    if not rec:
+        return {}
+    rec.update({k: v for k, v in fields.items() if v not in (None, "")})
+    rec["t"] = now()
+    try:
+        _write_now(rec)
+    except OSError:
+        pass
     return rec
 
 
@@ -119,9 +187,15 @@ class ClaudeStream:
         kind = msg.get("type")
         content = (msg.get("message") or {}).get("content")
         if kind == "assistant" and isinstance(content, list):
+            started = False
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "tool_use":
                     self.pending[block.get("id")] = (block.get("name"), block.get("input") or {})
+                    self.on_start(block.get("name"), block.get("input") or {})
+                    started = True
+            if not started and any(isinstance(b, dict) and b.get("type") in ("text", "thinking")
+                                   for b in content):
+                set_now("think", file=self.current, detail="Claude is thinking")
         elif kind == "user" and isinstance(content, list):
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "tool_result":
@@ -138,6 +212,39 @@ class ClaudeStream:
             if isinstance(text, str) and text.strip():
                 log(f"claude {self.label}: {text.strip()[:2000]}")
             log(f"claude {self.label}: finished ({msg.get('subtype')}, {turns} turns, ${cost})")
+
+    def on_start(self, name, inp):
+        """The live line: what Claude has just started doing."""
+        if name == "Read":
+            path = rel(inp.get("file_path", ""))
+            src = mirror_to_source(path)
+            if src.startswith("raw/_intake/"):
+                set_now("read", file=src, detail="Claude is reading it")
+            elif path.startswith("raw/inbox/"):
+                set_now("read", file=path, detail="Claude is reading the update")
+            else:
+                set_now("search", file=self.current, detail=f"reading {path}")
+        elif name in ("Glob", "Grep"):
+            what = inp.get("pattern") or inp.get("path") or ""
+            set_now("search", file=self.current, detail=f"searching the wiki for {what}".strip())
+        elif name in ("Write", "Edit", "MultiEdit"):
+            path = rel(inp.get("file_path", ""))
+            target = "the review queue" if path == "wiki/_review.md" else path.replace("wiki/", "", 1)
+            set_now("write", file=self.current, detail=f"writing {target}")
+        elif name == "Bash":
+            try:
+                words = shlex.split(inp.get("command", "") or "")
+            except ValueError:
+                words = []
+            if words[:1] == ["mv"]:
+                args = [w for w in words[1:] if not w.startswith("-")]
+                to = rel(args[-1]) if len(args) == 2 else ""
+                set_now("file", file=rel(args[0]) if args else self.current,
+                        detail=f"moving it to {to.rstrip('/')}" if to else "")
+            elif words[:1] == ["mkdir"]:
+                set_now("file", file=self.current, detail="making a folder")
+            else:
+                set_now("search", file=self.current, detail="looking around the folder")
 
     def on_tool(self, name, inp):
         if name == "Read":
@@ -243,14 +350,29 @@ def ignored_name(name):
             or name.endswith((".download", ".crdownload", ".part", ".partial", ".tmp")))
 
 
-def convert_stream(stream=sys.stdin):
+def convert_stream(stream=sys.stdin, total=0):
+    current, seen = "", 0
     for line in stream:
         log(line.rstrip("\n"))
         s = line.strip()
         if s.startswith("[") and "] " in s:
             head, _, name = s.partition("] ")
             if head[1:].isdigit() and name and not ignored_name(os.path.basename(name)):
-                emit("convert", file="raw/" + name)
+                if current:
+                    emit("converted", file=current)
+                current = "raw/" + name
+                seen += 1
+                emit("convert", file=current)
+                set_now("convert", file=current, n=seen, of=total or None,
+                        detail="converting it to text")
+        elif s.startswith("ocr: ") and current:
+            pages = s[len("ocr: "):].split(" ", 1)[0]
+            pages = int(pages) if pages.isdigit() else None
+            emit("ocr", file=current, pages=pages)
+            set_now("ocr", file=current, pages=pages, n=seen, of=total or None,
+                    detail="reading the scanned pages with OCR")
+    if current:
+        emit("converted", file=current)
 
 
 def main(argv=None):
@@ -263,9 +385,14 @@ def main(argv=None):
     c.add_argument("--file", required=True)
     c.add_argument("--pid", type=int, required=True)
     c.add_argument("--label", default="")
-    sub.add_parser("convert-stream")
+    cs = sub.add_parser("convert-stream")
+    cs.add_argument("--total", type=int, default=0)
+    n = sub.add_parser("now")
+    n.add_argument("type")
+    n.add_argument("fields", nargs="*")
     a = ap.parse_args(argv)
-    if a.cmd == "emit":
+    wiki_netguard.install()
+    if a.cmd in ("emit", "now"):
         fields = {}
         for kv in a.fields:
             k, sep, v = kv.partition("=")
@@ -278,11 +405,11 @@ def main(argv=None):
                     fields[k[:-1]] = v
             else:
                 fields[k] = v
-        emit(a.type, **fields)
+        (emit if a.cmd == "emit" else set_now)(a.type, **fields)
     elif a.cmd == "claude-stream":
         follow(a.file, a.pid, a.label)
     else:
-        convert_stream()
+        convert_stream(total=a.total)
 
 
 if __name__ == "__main__":

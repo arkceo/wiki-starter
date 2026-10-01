@@ -47,32 +47,49 @@
   #state.busy::before { background: var(--warn); animation: pulse 1.2s infinite; }
   #state.idle::before { background: var(--ok); }
   @keyframes pulse { 50% { opacity: .3; } }
-  .overall { flex: 1 1 14rem; }
-  .meter { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin-top: .3rem; }
-  .meter > span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
-  .meter.done > span { background: var(--ok); }
-  .meter.warn > span { background: var(--warn); }
-  .meter.bad > span { background: var(--bad); }
+  .overall { flex: 1 1 14rem; min-width: 0; }
+  /* Two tones, like a video's buffered and played: light = converted, solid = done. */
+  .meter { position: relative; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin-top: .3rem; }
+  .meter > span { position: absolute; inset: 0 auto 0 0; width: 0; transition: width .3s; }
+  .meter > .buf { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent-soft); }
+  .meter > .fill { background: var(--accent); }
+  .meter.done > .fill { background: var(--ok); }
+  /* The live line: what the computer is doing at this moment. */
+  #now { margin-top: .45rem; font-size: .9rem; min-height: 1.4em; overflow-wrap: anywhere; }
+  #now .glyph { display: inline-block; width: 1.1em; color: var(--warn); font-family: var(--mono); }
+  #now .verb { color: var(--accent); font-weight: 600; }
+  #now .obj { font-weight: 600; }
+  #now .paren { color: var(--muted); }
+  #now:empty { display: none; }
   #files { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 10px;
            background: var(--panel); }
   #files:empty::before { content: "Nothing uploaded yet."; display: block; padding: .9rem 1rem; color: var(--muted); }
+  #summary:not(:empty)::before { content: "· "; }
   #files li { padding: .75rem 1rem; border-top: 1px solid var(--line); }
   #files li:first-child { border-top: 0; }
   .file-head { display: flex; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
   .file-name { font-weight: 600; word-break: break-word; }
   .stage { font-size: .88rem; white-space: nowrap; }
   .stage.ok { color: var(--ok); } .stage.warn { color: var(--warn); } .stage.bad { color: var(--bad); }
+  /* One segment per real stage. Solid = finished; shimmering = happening now; a partial
+     fill only where the progress is measured (upload bytes). Waiting is not a stage. */
   .steps { display: flex; gap: .25rem; margin-top: .45rem; }
-  .steps span { flex: 1; height: 6px; border-radius: 3px; background: var(--line); }
+  .steps span { flex: 1; height: 6px; border-radius: 3px; background: var(--line); position: relative; overflow: hidden; }
   .steps span.on { background: var(--accent); }
   .steps.done span.on { background: var(--ok); }
   .steps.warn span.on { background: var(--warn); }
   .steps.bad span.on { background: var(--bad); }
-  .steps .upl { position: relative; overflow: hidden; }
-  .steps .upl > i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--accent); }
-  .steps.done .upl > i { background: var(--ok); }
-  .steps.warn .upl > i { background: var(--warn); }
-  .steps.bad .upl > i { background: var(--bad); }
+  .steps span > i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--accent); }
+  .steps span.active::after { content: ""; position: absolute; inset: 0; animation: shimmer 1.3s linear infinite;
+    background: linear-gradient(90deg, transparent 0%, var(--accent) 45%, var(--accent) 55%, transparent 100%);
+    background-size: 50% 100%; background-repeat: no-repeat; }
+  @keyframes shimmer { from { background-position: -50% 0; } to { background-position: 150% 0; } }
+  #files li.legend { display: flex; gap: .25rem; padding: .45rem 1rem; font-size: .75rem; color: var(--muted); }
+  #files li.legend span { flex: 1; }
+  @media (prefers-reduced-motion: reduce) {
+    .steps span.active::after { animation: none; background: var(--accent); opacity: .45; background-size: 100% 100%; }
+    #state.busy::before { animation: none; }
+  }
   .detail { font-size: .86rem; color: var(--muted); margin-top: .35rem; word-break: break-word; }
   .detail a { margin-right: .6rem; }
   #log { margin: 0; padding: .75rem 1rem; height: 22rem; overflow: auto; border: 1px solid var(--line);
@@ -107,7 +124,9 @@
   <div class="bar-row">
     <div class="overall">
       <div><span id="state">Checking…</span> <span class="muted" id="summary"></span></div>
-      <div class="meter" id="overall-meter"><span></span></div>
+      <div class="meter" id="overall-meter" title="Light: converted to text. Solid: done.">
+        <span class="buf"></span><span class="fill"></span></div>
+      <div id="now" aria-live="off"></div>
     </div>
     <button type="button" class="secondary" id="process">Process now</button>
   </div>
@@ -134,22 +153,67 @@
   document.title = "Upload & Logs · " + BOOT.title
 
   const $ = (id) => document.getElementById(id)
-  const filesEl = $("files"), logEl = $("log")
+  const filesEl = $("files"), logEl = $("log"), nowEl = $("now")
   const rows = new Map()          // queue path (or temporary upload id) -> row state
   const order = []
   let uploading = 0
   let currentRun = ""
+  let runner = { running: false, since: "" }
+  let now = {}                    // what the engine is doing at this moment (now.json)
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches
   // Events written before this page opened are history: shown dimmed, above a divider.
   const openedAt = Date.now() - 2000
   let dividerShown = false
 
-  // Stages a file walks through. Upload is real bytes; the rest are honest steps, not a guess.
-  const DOC_STEPS = ["Uploading", "Queued", "Converting", "Reading", "Filed"]
-  const PACKET_STEPS = ["Uploading", "Queued", "Reading", "Applied"]
-  const FINAL = { filed: "ok", applied: "ok", parked: "warn", retry: "warn", skipped: "muted", failed: "bad", duplicate: "muted" }
+  // The real stages a file goes through. Waiting is a label, never a stage, so a bar only
+  // moves when work has actually been done.
+  const DOC_STAGES = ["Upload", "Convert", "Read & write", "File"]
+  const PACKET_STAGES = ["Upload", "Read", "Apply"]
+  // state -> [stages finished, stage happening now (-1: none)]
+  const PLACE = {
+    doc: { uploading: [0, 0], queued: [1, -1], "waiting-convert": [1, -1], converting: [1, 1], ocr: [1, 1],
+           converted: [2, -1], reading: [2, 2], filing: [3, 3], filed: [4, -1] },
+    packet: { uploading: [0, 0], queued: [1, -1], reading: [1, 1], applying: [2, 2], applied: [3, -1] },
+  }
+  const RANK = { uploading: 0, queued: 1, "waiting-convert": 2, converting: 3, ocr: 3, converted: 4,
+                 reading: 5, applying: 6, filing: 6, filed: 7, applied: 7 }
+  const FINAL = { filed: "ok", applied: "ok", parked: "warn", failed: "bad", skipped: "muted", duplicate: "muted" }
+
+  // The live line, in the spirit of a terminal spinner: a verb that keeps changing, always
+  // one that fits the step, and in brackets the plain facts of what is being done.
+  const POOLS = {
+    settle: ["Letting the files settle", "Waiting for the copying to finish"],
+    convert: ["Unfolding", "Unpacking", "Transcribing", "Decanting"],
+    ocr: ["Squinting at", "Deciphering", "Peering at", "Making out the letters in"],
+    load: ["Waking the model", "Warming up the model", "Stretching the model's legs"],
+    read: ["Reading", "Digesting", "Leafing through", "Poring over"],
+    ask: ["Noodling over", "Mulling over", "Pondering", "Chewing on", "Ruminating on"],
+    check: ["Cross-checking", "Comparing notes on", "Double-checking"],
+    write: ["Caramelising", "Weaving", "Stitching", "Simmering", "Drafting"],
+    search: ["Rummaging through the wiki", "Looking things up", "Cross-referencing"],
+    file: ["Tucking away", "Shelving", "Filing"],
+    apply: ["Folding in", "Stirring in", "Applying"],
+    think: ["Noodling", "Percolating", "Marinating", "Mulling it over"],
+    tidy: ["Tidying up", "Sweeping up", "Straightening the edges"],
+    commit: ["Saving a version", "Committing it to memory"],
+    build: ["Plating up the website", "Polishing the pages", "Setting the table"],
+  }
+  const WITH_FILE = new Set(["convert", "ocr", "read", "ask", "check", "write", "file", "apply"])
+  const GLYPHS = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]
 
   const base = (p) => (p || "").split("/").pop()
+  // A long name keeps its start and its end (the extension), so the facts after it fit.
+  const shortName = (s) => s.length > 44 ? s.slice(0, 26) + "…" + s.slice(-15) : s
   const fmtSize = (n) => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(0) + " KB" : (n / 1048576).toFixed(1) + " MB"
+  const fmtTokens = (n) => n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n)
+  const fmtElapsed = (ms) => {
+    const s = Math.max(0, Math.floor(ms / 1000))
+    if (s < 60) return s + "s"
+    const m = Math.floor(s / 60)
+    if (m < 60) return m + "m " + String(s % 60).padStart(2, "0") + "s"
+    return Math.floor(m / 60) + "h " + String(m % 60).padStart(2, "0") + "m"
+  }
+  const when = (t) => { const ms = t ? Date.parse(t) : NaN; return isNaN(ms) ? Date.now() : ms }
   const pageUrl = (p) => SITE + "/" + p.replace(/^wiki\//, "").replace(/\.md$/, "").replace(/(^|\/)index$/, "$1")
     .split("/").map((s) => encodeURIComponent(s.replace(/ /g, "-"))).join("/")
   const rawUrl = (p) => SITE + "/" + p.split("/").map(encodeURIComponent).join("/")
@@ -158,8 +222,8 @@
   function row(key, name) {
     let r = rows.get(key)
     if (!r) {
-      r = { key, name: name || base(key), size: 0, stage: "Queued", step: 1, pct: 0, kind: isPacketPath(key) ? "packet" : "doc",
-            final: "", pages: [], to: "", note: "" }
+      r = { key, name: name || base(key), size: 0, kind: isPacketPath(key) ? "packet" : "doc", state: "queued",
+            pct: 0, since: 0, pages: 0, written: new Set(), links: [], to: "", note: "", final: "", retry: false, run: "" }
       rows.set(key, r)
       order.unshift(key)
     }
@@ -176,19 +240,55 @@
     order[order.indexOf(oldKey)] = newKey
     return r
   }
-  function advance(r, stage) {
-    if (r.final && stage !== "Filed" && stage !== "Applied") return
-    const steps = r.kind === "packet" ? PACKET_STEPS : DOC_STEPS
-    const i = steps.indexOf(stage)
-    if (i >= 0 && i >= r.step) { r.step = i; r.stage = stage }
+  // Move a file forward to a state; never backwards (events can repeat or arrive late).
+  function setState(r, state, t, force) {
+    if (!r || (r.final && !force)) return
+    if (!force && (RANK[state] ?? 0) < (RANK[r.state] ?? 0)) return
+    if (state !== r.state) r.since = when(t)
+    r.state = state
+    if (state !== "queued" && state !== "waiting-convert") r.retry = false
   }
-  function finish(r, final, label) {
+  function finish(r, final, t) {
     r.final = final
-    r.stage = label
-    if (final === "filed" || final === "applied") r.step = (r.kind === "packet" ? PACKET_STEPS : DOC_STEPS).length - 1
+    r.retry = false
+    if (final === "filed" || final === "applied") r.state = final
+    r.since = when(t)
+  }
+
+  // ------------------------------------------------------------------ labels
+  const ago = (r) => r.since ? " · " + fmtElapsed(Date.now() - r.since) : ""
+  function rowLabel(r) {
+    if (r.final) return { filed: "Filed", applied: "Applied", parked: "Needs review", failed: "Upload failed",
+                          skipped: "Skipped", duplicate: "Already queued" }[r.final] || r.final
+    if (r.retry) return "Will retry"
+    switch (r.state) {
+      case "uploading": return `Uploading ${r.pct}%`
+      case "queued": return r.kind === "packet" && r.run ? "Waiting its turn" : "Queued"
+      case "waiting-convert": return "Waiting to convert"
+      case "converting": return "Converting to text" + ago(r)
+      case "ocr": return `OCR · ${r.pages} page${r.pages === 1 ? "" : "s"}` + ago(r)
+      case "converted": return "Converted · waiting its turn"
+      default: return activeLabel(r) + ago(r)
+    }
+  }
+  function activeLabel(r) {
+    const n = now.file === r.key && now.phase !== "idle" ? now : null
+    if (!n) return r.state === "filing" ? "Filing" : r.state === "applying" ? "Applying" : "Reading"
+    switch (n.phase) {
+      case "load": return "Waiting for the model to load"
+      case "ask": return "Reading" + (n.of > 1 ? ` · part ${n.n} of ${n.of}` : "") + (n.tokens ? ` · ${fmtTokens(n.tokens)} tokens` : "")
+      case "check": return "Checking against the wiki" + (n.of ? ` · ${n.n} of ${n.of}` : "")
+      case "write": return "Writing pages" + (r.written.size ? ` · ${r.written.size} so far` : "")
+      case "file": return r.kind === "packet" ? "Archiving" : "Filing"
+      case "apply": return "Applying"
+      case "search": return "Looking things up"
+      case "think": return "Thinking"
+      default: return "Reading"
+    }
   }
 
   // ------------------------------------------------------------------ render
+  const labelEls = new Map()
   let renderQueued = false
   function render() {
     if (renderQueued) return
@@ -196,26 +296,39 @@
     requestAnimationFrame(() => {
       renderQueued = false
       filesEl.textContent = ""
-      let total = 0, done = 0, score = 0
-      for (const key of order.slice(0, 200)) {
+      labelEls.clear()
+      let total = 0, done = 0, aside = 0, ready = 0
+      const shown = order.slice(0, 200)
+      if (shown.some((k) => rows.get(k) && rows.get(k).kind === "doc")) {
+        const legend = document.createElement("li"); legend.className = "legend"; legend.setAttribute("aria-hidden", "true")
+        for (const s of DOC_STAGES) { const sp = document.createElement("span"); sp.textContent = s; legend.append(sp) }
+        filesEl.append(legend)
+      }
+      for (const key of shown) {
         const r = rows.get(key)
         if (!r) continue
-        const steps = r.kind === "packet" ? PACKET_STEPS : DOC_STEPS
+        const stages = r.kind === "packet" ? PACKET_STAGES : DOC_STAGES
         const li = document.createElement("li")
         const head = document.createElement("div"); head.className = "file-head"
         const nm = document.createElement("span"); nm.className = "file-name"; nm.textContent = r.name
-        const st = document.createElement("span"); st.className = "stage " + (FINAL[r.final] || "")
-        st.textContent = r.stage + (r.step === 0 && !r.final ? " " + r.pct + "%" : "")
+        const st = document.createElement("span")
+        st.className = "stage " + (FINAL[r.final] || (r.retry ? "warn" : ""))
+        st.textContent = rowLabel(r)
+        labelEls.set(key, [st, r])
         head.append(nm, st)
+        let [finished, active] = r.final === "failed" || r.final === "skipped" || r.final === "duplicate" ? [0, -1]
+          : (PLACE[r.kind][r.state] || [1, -1])
+        if (r.final === "parked" || r.retry) active = -1
         const bar = document.createElement("div")
-        bar.className = "steps" + (r.final ? " " + ({ ok: "done", warn: "warn", bad: "bad" }[FINAL[r.final]] || "") : "")
-        steps.forEach((_, i) => {
+        bar.className = "steps" + ({ ok: " done", warn: " warn", bad: " bad" }[FINAL[r.final]] || (r.retry ? " warn" : ""))
+        stages.forEach((name, i) => {
           const s = document.createElement("span")
-          if (i === 0) {
-            s.className = "upl" + (r.step > 0 || r.final ? " on" : "")
-            const fill = document.createElement("i"); fill.style.width = (r.step > 0 || r.final ? 100 : r.pct) + "%"
-            s.append(fill)
-          } else if (i <= r.step && !(r.final === "skipped" || r.final === "duplicate" || r.final === "failed")) s.className = "on"
+          s.title = name
+          if (i < finished) s.className = "on"
+          else if (i === active) {
+            s.className = "active"
+            if (i === 0) { const fill = document.createElement("i"); fill.style.width = r.pct + "%"; s.append(fill) }
+          }
           bar.append(s)
         })
         li.append(head, bar)
@@ -226,7 +339,7 @@
           const a = document.createElement("a"); a.href = rawUrl(r.to); a.textContent = "original"; a.target = "_blank"
           det.append(a)
         }
-        for (const p of r.pages.slice(0, 8)) {
+        for (const p of r.links.slice(0, 8)) {
           const a = document.createElement("a"); a.href = pageUrl(p); a.textContent = base(p).replace(/\.md$/, "")
           det.append(a)
         }
@@ -234,17 +347,92 @@
         filesEl.append(li)
         if (r.final !== "skipped" && r.final !== "duplicate") {
           total++
-          if (r.final) done++
-          score += r.final ? 1 : (r.step === 0 ? r.pct / 100 * 0.2 : r.step / (steps.length - 1))
+          if (r.final === "filed" || r.final === "applied") done++
+          if (r.final === "parked" || r.final === "failed") aside++
+          if (r.final === "filed" || r.final === "applied" || RANK[r.state] >= (r.kind === "doc" ? RANK.converted : RANK.reading)) ready++
         }
       }
+      // Solid: done. Light: converted and ready to be read. No guessed weights.
       const meter = $("overall-meter")
-      const pct = total ? Math.round((score / total) * 100) : 0
-      meter.firstElementChild.style.width = pct + "%"
+      const pct = total ? Math.round((done / total) * 100) : 0
+      meter.querySelector(".fill").style.width = pct + "%"
+      meter.querySelector(".buf").style.width = (total ? Math.round((ready / total) * 100) : 0) + "%"
       meter.className = "meter" + (total && done === total ? " done" : "")
-      $("summary").textContent = total ? `${done} of ${total} done · ${pct}%` : ""
+      $("summary").textContent = total
+        ? `${done} of ${total} done${aside ? ` · ${aside} set aside` : ""} · ${pct}%` : ""
+      renderNow()
     })
   }
+
+  // ------------------------------------------------------------------ live line
+  let glyph = 0
+  function busy() {
+    if (!now.phase || now.phase === "idle") return false
+    return runner.running || Date.now() - when(now.t) < 15000
+  }
+  function nowFacts(n, elapsed) {
+    const out = []
+    if (n.detail) out.push(n.detail)
+    if ((n.phase === "convert" || n.phase === "ocr") && n.n && n.of) out.push(`document ${n.n} of ${n.of}`)
+    if (n.phase === "ask" && n.of > 1) out.push(`part ${n.n} of ${n.of}`)
+    if (n.phase === "check" && n.n && n.of) out.push(`${n.n} of ${n.of}`)
+    if (n.pages) out.push(`${n.pages} page${n.pages === 1 ? "" : "s"}`)
+    if (n.tokens) out.push(`${fmtTokens(n.tokens)} tokens`)
+    out.push(fmtElapsed(elapsed))
+    return out.join(" · ")
+  }
+  function renderNow() {
+    if (!busy()) { nowEl.textContent = ""; return }
+    const pool = POOLS[now.phase] || POOLS.think
+    const elapsed = Date.now() - when(now.since || now.t)
+    let seed = 0
+    for (const ch of (now.phase + (now.file || ""))) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0
+    const verb = reduced ? pool[0] : pool[(seed + Math.floor(elapsed / 4000)) % pool.length]
+    const g = document.createElement("span"); g.className = "glyph"; g.textContent = reduced ? "✻" : GLYPHS[glyph % GLYPHS.length]
+    const v = document.createElement("span"); v.className = "verb"; v.textContent = verb
+    const parts = [g, v]
+    if (now.file && WITH_FILE.has(now.phase)) {
+      const o = document.createElement("span"); o.className = "obj"; o.textContent = " " + shortName(base(now.file))
+      parts.push(o)
+    }
+    const p = document.createElement("span"); p.className = "paren"; p.textContent = ` (${nowFacts(now, elapsed)})`
+    parts.push("…", p)
+    nowEl.replaceChildren(...parts)
+    nowEl.title = nowEl.textContent
+  }
+  function onNow(n) {
+    if (!n || typeof n !== "object") return
+    if (now.t && n.t && when(n.t) < when(now.t)) return
+    now = n
+    if (n.run) currentRun = n.run
+    // The engine is at work: say so now, not at the next status poll.
+    if (n.phase && n.phase !== "idle" && !runner.running && Date.now() - when(n.t) < 15000) {
+      const st = $("state")
+      if (!/^Working/.test(st.textContent)) { st.className = "busy"; st.textContent = "Working" }
+    }
+    const r = n.file ? rows.get(n.file) : null
+    if (r && !r.final) {
+      if (n.phase === "convert") setState(r, "converting", n.since)
+      else if (n.phase === "ocr") { r.pages = n.pages || r.pages; setState(r, "ocr", n.since) }
+      else if (r.kind === "packet" && (n.phase === "write" || n.phase === "file")) setState(r, "applying", n.since)
+      else if (n.phase === "file") setState(r, "filing", n.since)
+      else if (["load", "read", "ask", "check", "write", "search", "think", "apply"].includes(n.phase)) setState(r, "reading", n.since)
+    }
+    // Past the conversion step, documents of this run that had nothing to convert are ready.
+    if (!["convert", "ocr", "settle", "idle"].includes(n.phase)) {
+      for (const x of rows.values()) if (x.state === "waiting-convert" && x.run && x.run === currentRun) setState(x, "converted", n.t)
+    }
+    render()
+  }
+  // Once a second: the clocks on the live line and on the files being worked on.
+  function tick() {
+    renderNow()
+    for (const [el, r] of labelEls.values()) {
+      if (!r.final && !r.retry && ["converting", "ocr", "reading", "filing", "applying"].includes(r.state)) el.textContent = rowLabel(r)
+    }
+  }
+  setInterval(tick, 1000)
+  if (!reduced) setInterval(() => { glyph++; const g = nowEl.querySelector(".glyph"); if (g) g.textContent = GLYPHS[glyph % GLYPHS.length] }, 120)
 
   // ------------------------------------------------------------------ log
   function logLine(t, text, cls) {
@@ -276,31 +464,44 @@
         if (e.duplicate) { logLine(e.t, `${e.name ? base(e.name) : n}: the same file is already queued`, "warn"); break }
         const r = row(f, e.name ? base(e.name) : n)
         r.size = e.bytes || r.size
-        advance(r, "Queued"); logLine(e.t, `Uploaded ${r.name} (${fmtSize(e.bytes || 0)})`)
+        setState(r, "queued", e.t); logLine(e.t, `Uploaded ${r.name} (${fmtSize(e.bytes || 0)})`)
         break
       }
       case "waiting": logLine(e.t, "Waiting for files to finish copying…"); break
       case "run-start":
         currentRun = e.run || ""
         logLine(e.t, `Started: ${e.docs || 0} document(s), ${e.packets || 0} packet(s)`); break
-      case "queued": { const r = row(f); if (!r.final) advance(r, "Queued"); break }
+      case "queued": {
+        // In this run. A file that was waiting for a retry starts over.
+        const r = row(f)
+        if (r.final) break
+        r.run = e.run || currentRun
+        if (r.retry) { r.retry = false; setState(r, r.kind === "doc" ? "waiting-convert" : "queued", e.t, true) }
+        else setState(r, r.kind === "doc" ? "waiting-convert" : "queued", e.t)
+        break
+      }
       case "routed": { rekey(f, e.to); logLine(e.t, `Moved ${n} to the ${isPacketPath(e.to) ? "packet" : "document"} queue`); break }
-      case "convert": { advance(row(f), "Converting"); logLine(e.t, `Converting ${n} to text`); break }
+      case "convert": { setState(row(f), "converting", e.t); logLine(e.t, `Converting ${n} to text`); break }
+      case "ocr": {
+        const r = row(f); r.pages = e.pages || r.pages; setState(r, "ocr", e.t)
+        logLine(e.t, `${n} is a scan: reading its ${e.pages ? e.pages + " " : ""}page${e.pages === 1 ? "" : "s"} with OCR`); break
+      }
+      case "converted": { const r = row(f); if (RANK[r.state] <= RANK.ocr) setState(r, "converted", e.t); break }
       case "claude-start":
         logLine(e.t, e.label === "intake" ? "Claude is reading the documents"
           : e.label && e.label.startsWith("ingest") ? "Claude is applying the Update Packets"
           : e.label === "local" ? "The model on this Mac is reading (nothing leaves the Mac)"
           : "Reading (" + (e.label || "engine") + ")"); break
-      case "read": { advance(row(f), "Reading"); logLine(e.t, `Reading ${n}`); break }
+      case "read": { setState(row(f), "reading", e.t); logLine(e.t, `Reading ${n}`); break }
       case "page": {
-        if (f) { const r = row(f); if (!r.pages.includes(e.page)) r.pages.push(e.page) }
+        if (f) { const r = row(f); r.written.add(e.page); if (!r.links.includes(e.page)) r.links.push(e.page) }
         logLine(e.t, `${e.action === "created" ? "Created" : "Updated"} page ${e.page.replace(/^wiki\//, "")}`); break
       }
       case "review": logLine(e.t, `Noted something for review${n ? " (" + n + ")" : ""}`, "warn"); break
       case "filed": case "applied": {
         const r = row(f)
         r.to = e.to || r.to
-        finish(r, e.type, e.type === "filed" ? "Filed" : "Applied")
+        finish(r, e.type, e.t)
         if (!seenFinal.has(e.type + f)) {
           seenFinal.add(e.type + f)
           logLine(e.t, e.type === "filed" ? `Filed ${n} → ${(e.to || "").split("/").slice(0, -1).join("/")}` : `Applied packet ${n}`, "ok")
@@ -309,13 +510,13 @@
       }
       case "parked": {
         const r = row(f); r.to = e.to || ""
-        finish(r, "parked", "Needs review")
+        finish(r, "parked", e.t)
         r.note = "Could not be processed; see the Review queue"
         logLine(e.t, `${n} could not be processed after ${e.attempts || 2} tries; moved to needs-review`, "warn"); break
       }
       case "retry": {
         const r = row(f); r.note = "Not finished; it will be tried again"
-        if (!r.final) r.stage = "Will retry"
+        if (!r.final) r.retry = true
         logLine(e.t, `${n} is not finished yet; it will be tried again`, "warn"); break
       }
       case "claude-end":
@@ -329,7 +530,10 @@
       case "build-failed": logLine(e.t, "The website could not be rebuilt; the previous version is still shown", "bad"); break
       case "run-end": logLine(e.t, `Done: ${e.docs || 0} document(s), ${e.packets || 0} packet(s)`, "ok"); break
       case "rerun": logLine(e.t, `${e.count || "More"} file(s) arrived meanwhile; starting again`); break
-      case "error": logLine(e.t, "Problem: " + (e.msg || "unknown"), "bad"); break
+      case "error": {
+        if (f) { const r = row(f); if (!r.final) { r.retry = true; r.note = e.msg || "" } }
+        logLine(e.t, "Problem: " + (e.msg || "unknown"), "bad"); break
+      }
       case "process-requested": logLine(e.t, "Process now pressed"); break
       default: if (e.msg) logLine(e.t, e.msg)
     }
@@ -350,6 +554,7 @@
   function connect() {
     const es = new EventSource("/api/events?token=" + encodeURIComponent(TOKEN))
     es.onmessage = (m) => { try { onEvent(JSON.parse(m.data)) } catch (_) {} }
+    es.addEventListener("now", (m) => { try { onNow(JSON.parse(m.data)) } catch (_) {} })
     es.onerror = () => { if (es.readyState === EventSource.CLOSED) reloadForNewToken() }
   }
 
@@ -361,13 +566,15 @@
         const s = await r.json()
         const st = $("state")
         const waiting = s.queue.intake.length + s.queue.inbox.length
-        if (s.runner.running) { st.className = "busy"; st.textContent = "Working" + (s.runner.since ? " since " + s.runner.since : "") }
+        runner = s.runner || { running: false }
+        if (runner.running) { st.className = "busy"; st.textContent = "Working" + (runner.since ? " since " + runner.since : "") }
         else if (waiting) { st.className = "busy"; st.textContent = `${waiting} file(s) waiting to start` }
         else { st.className = "idle"; st.textContent = "Idle" }
-        $("process").disabled = s.runner.running || !waiting
+        $("process").disabled = runner.running || !waiting
         $("limit").textContent = `Up to ${s.maxUploadMb} MB per file.`
         maxBytes = s.maxUploadMb * 1048576
         for (const p of [...s.queue.intake, ...s.queue.inbox]) row(p)  // also files added outside this page
+        if (s.now) onNow(s.now)
         render()
       }
     } catch (_) {}
@@ -385,13 +592,13 @@
     const r = row(key, base(name))
     r.size = file.size
     if (file.size > maxBytes) {
-      finish(r, "skipped", "Skipped")
+      finish(r, "skipped")
       r.note = `Larger than the ${Math.round(maxBytes / 1048576)} MB limit`
       render()
       return
     }
-    r.stage = "Uploading"
-    r.step = 0
+    r.state = "uploading"
+    r.pct = 0
     queue.push({ file, name, key })
     pump()
     render()
@@ -414,14 +621,14 @@
       const r = rows.get(key)
       if (xhr.status === 200 && res.ok) {
         const merged = rekey(key, res.file)
-        if (merged && !merged.final) advance(merged, "Queued")
+        if (merged) setState(merged, "queued")
         if (res.duplicate && merged && merged.key === res.file) {
           // Nothing new was queued; the row now tracks the copy that already was.
           merged.note = "The same file was already queued"
         }
       } else if (r) {
-        if (res.skipped) { finish(r, "skipped", "Skipped"); r.note = "Skipped: " + res.skipped }
-        else { finish(r, "failed", "Upload failed"); r.note = res.error || (xhr.status ? "Error " + xhr.status : "Connection lost") }
+        if (res.skipped) { finish(r, "skipped"); r.note = "Skipped: " + res.skipped }
+        else { finish(r, "failed"); r.note = res.error || (xhr.status ? "Error " + xhr.status : "Connection lost") }
         logLine(null, `${r.name}: ${r.note}`, res.skipped ? "warn" : "bad")
       }
       render()

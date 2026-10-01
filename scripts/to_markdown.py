@@ -135,6 +135,7 @@ def main():
                                 deferred += 1
                                 continue
                             else:
+                                print(f"    ocr: {npages} pages", file=sys.stderr, flush=True)
                                 tmpdir = tempfile.mkdtemp()
                                 ocr_pdf = os.path.join(tmpdir, "ocr.pdf")
                                 subprocess.run(

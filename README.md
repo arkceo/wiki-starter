@@ -58,9 +58,10 @@ If macOS shows **Background Items Added**, leave it allowed.
 - **Add documents or notes:** click **Upload** at the top right of any wiki page. Drop in
   files, whole folders or Update Packets, or use **Choose files**. Your originals stay
   where they are.
-- **Watch progress:** the Upload page shows each file moving through uploaded, queued,
-  converting, reading and filed. It also shows an "n of m done" count and a live log. You
-  get a notification when the wiki has been updated.
+- **Watch progress:** the Upload page shows each file moving through its real stages
+  (upload, convert, read and write, file), an "n of m done" count, a live line saying what
+  the wiki is doing at that moment, and a log of what it has done. You get a notification
+  when the wiki has been updated.
 - **Process immediately:** press **Process now** on the Upload page.
 - **Ask questions** (Claude only): open the wiki folder in the Claude desktop app, or run
   `claude` in Terminal inside that folder.
@@ -90,6 +91,7 @@ skill, say "wrap up" at the end of a conversation, and upload the file it gives 
 | "The local model could not run" | Paste the install line again. It checks and repairs the model. |
 | A file was moved to `raw/_needs-review/` | It failed twice. Check that it opens, then upload it again. |
 | No notifications appear | Open System Settings → Notifications → **Script Editor** and allow notifications. |
+| macOS asks to let "Python" find devices on local networks | Choose **Don't Allow**. The wiki only talks to this Mac and works either way. |
 
 Logs are in `~/Library/Logs/wiki-starter/`. Costs, privacy and how the two reading
 options compare are in `INSTALL.md`.
@@ -97,7 +99,8 @@ options compare are in `INSTALL.md`.
 ## What stays where
 
 - Your documents and the wiki: in `~/Wiki/<name>` on this Mac. Back it up with Time Machine.
-- The site: served only to this Mac. Nothing on your network can open it.
+- The site: served only to this Mac. Nothing on your network can open it, and the wiki
+  never looks for or connects to other devices on it.
 - Sent to Anthropic: the text Claude reads while it works, nothing else. With the model on
   this Mac, nothing at all.
 - Version history: a local git history in the wiki folder, never pushed anywhere.

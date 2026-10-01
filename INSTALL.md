@@ -63,8 +63,9 @@ If anything fails, run the same line again. Finished steps are skipped.
 ## Using it
 
 - **Add documents and notes** → click **Upload** at the top right of the wiki and drop
-  files or whole folders onto the page. It shows each file's progress (uploaded, queued,
-  converting, reading, filed) and a live log of what the wiki is doing.
+  files or whole folders onto the page. Each file shows its real stages (upload, convert,
+  read and write, file); a live line says what the wiki is doing at that moment (which
+  file, which step, how long); and a log keeps what it has done.
 - **Update Packets** are uploaded the same way. To get them, upload the `skills/packet/`
   folder (zip it first) to your Claude account in its Skills settings,
   then say "wrap up" at the end of a conversation.
@@ -90,6 +91,9 @@ If anything fails, run the same line again. Finished steps are skipped.
 
 - Documents and the wiki stay on this Mac, in `~/Wiki/<title>`.
 - The site is served only to this Mac (`127.0.0.1`). Other devices cannot open it.
+- The wiki never uses your local network: it does not look for, or connect to, other
+  devices. If macOS asks whether "Python" may find devices on your local network, choose
+  **Don't Allow**; everything keeps working.
 - With Claude, the text Claude reads while working is sent to Anthropic to be processed.
   With the model on this Mac, nothing leaves the Mac.
 - Source documents are not kept in the wiki's git history. **Turn on Time Machine.**

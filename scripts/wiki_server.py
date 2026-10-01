@@ -12,7 +12,8 @@ Run by a LaunchAgent with KeepAlive. Two origins, on two ports of 127.0.0.1:
   the Upload app (uploadPort, default port + 1)
     /upload            the Upload & Logs page (engine/upload/upload.html)
     /api/upload        POST one file into the queue (raw/_intake/, or raw/inbox/ for a packet)
-    /api/events        the activity log as a live stream (server-sent events)
+    /api/events        the activity log as a live stream (server-sent events), and what
+                       is happening right now as `now` events
     /api/status        what is queued, running and waiting for review
     /api/process       POST: start the runner now
 
@@ -26,7 +27,9 @@ page, from another site or from inside the wiki, using the browser against them:
   - an original that a browser could run (HTML, SVG, XML, ...) is sent as a download in a
     sandbox, never shown inline.
 Requests that try to escape the served folders (../, encoded or not, or a symlink
-pointing outside) are refused. Standard library only.
+pointing outside) are refused. Nothing here looks up a name or reaches another device on
+the network (scripts/wiki_netguard.py refuses it), so macOS has no reason to ask for
+local network access. Standard library only.
 
 Usage: wiki_server.py [--port N] [--upload-port N]   (default: wiki.config.json)
 """
@@ -50,6 +53,7 @@ import urllib.parse
 WIKI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(WIKI_DIR, "scripts"))
 import wiki_events  # noqa: E402
+import wiki_netguard  # noqa: E402
 
 BIND = "127.0.0.1"
 ROOTS = {"raw": "raw", "archive": "archive"}  # url prefix -> folder under WIKI_DIR
@@ -231,6 +235,7 @@ def status():
         "queue": {k: list_queue(v) for k, v in QUEUES.items()},
         "needsReview": list_queue("raw/_needs-review"),
         "runner": runner_state(),
+        "now": wiki_events.read_now(),
     }
 
 
@@ -457,8 +462,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._headers(200, "text/event-stream; charset=utf-8", None, {"X-Frame-Options": "DENY"})
         self.wfile.write(b"retry: 2000\n\n")
         self.wfile.flush()
-        last_beat, buf = time.time(), b""
+        last_beat, buf, now_seen = time.time(), b"", None
         while True:
+            # What is happening right now: sent whenever it changes. No id line, so a
+            # reconnect still resumes the log where it left off.
+            try:
+                st = os.stat(wiki_events.NOW)
+                stamp = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                stamp = None
+            if stamp and stamp != now_seen:
+                now_seen = stamp
+                rec = wiki_events.read_now()
+                if rec:
+                    self.wfile.write(b"event: now\ndata: " + json.dumps(rec, ensure_ascii=False).encode() + b"\n\n")
+                    self.wfile.flush()
+                    last_beat = time.time()
             try:
                 size = os.path.getsize(path)
             except OSError:
@@ -591,12 +610,19 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
         self.role, self.site_port, self.app_port = role, site_port, app_port
         super().__init__(addr, Handler)
 
+    def server_bind(self):
+        # HTTPServer.server_bind looks the address up by name (socket.getfqdn), a network
+        # lookup this server never needs. Bind, and name it by its address instead.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = BIND, self.server_address[1]
+
 
 def main():
     ap = argparse.ArgumentParser(description="Serve the wiki to this Mac only.")
     ap.add_argument("--port", type=int, default=default_port())
     ap.add_argument("--upload-port", type=int, default=None)
     a = ap.parse_args()
+    wiki_netguard.install()
     app_port = a.upload_port or default_upload_port(a.port)
     # Nothing can be mid-upload when the viewer starts: leftovers are from a killed one,
     # and would make every run wait for "files still copying".

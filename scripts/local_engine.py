@@ -40,7 +40,9 @@ Exit status: 0 all done; 1 some files failed (they stay queued and are retried, 
 aside, like any file); 2 the model could not run at all (nothing is counted against the
 files).
 
-Standard library only. Progress goes to the activity log (scripts/wiki_events.py).
+Standard library only. Progress goes to the activity log (scripts/wiki_events.py), and
+each step (loading the model, each question, writing, filing) to its live line, with the
+model's answer streamed so the line can count the words as they arrive.
 """
 import argparse
 import datetime
@@ -64,10 +66,12 @@ import urllib.request
 WIKI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(WIKI_DIR, "scripts"))
 import wiki_events  # noqa: E402
+import wiki_netguard  # noqa: E402
 
 CHUNK_CHARS = 18000          # about 5-6k tokens: leaves room for instructions and the answer
 MAX_PARTS = 24               # longer documents are summarised from their first parts
 DOC_BUDGET_SECONDS = 2700    # one document may take this long before it counts as failed
+TOKEN_NOTE_SECONDS = 1.5     # how often the live line hears how far an answer has got
 HOUSE_RULES_CHARS = 2500
 MAX_PAGE_CHOICES = 150
 IGNORED_DIRS = {"_intake", "inbox", "_needs-review", "_unfiled"}
@@ -425,6 +429,9 @@ class Model:
         os.makedirs(os.path.dirname(wiki_events.LOG_FILE), exist_ok=True)
         logf = open(wiki_events.LOG_FILE, "a")
         log(f"starting the model ({os.path.basename(model)})")
+        waiting = wiki_events.read_now()  # the step that needs the model, resumed once it is up
+        say("load", f"loading {model_name(model)} into memory")
+        t0 = time.time()
         try:
             self.proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=logf, stderr=logf)
         except OSError as e:
@@ -438,7 +445,10 @@ class Model:
                 with urllib.request.urlopen(url + "/health", timeout=5) as r:
                     if r.status == 200:
                         self.url = url  # only a server that answered is used
-                        log("model ready")
+                        log(f"model ready in {round(time.time() - t0)}s")
+                        if waiting.get("phase") and waiting["phase"] != "load":
+                            wiki_events.set_now(waiting["phase"], **{k: waiting[k] for k in
+                                                ("file", "detail", "n", "of") if k in waiting})
                         return
             except (urllib.error.URLError, OSError, http.client.HTTPException):
                 pass
@@ -501,11 +511,16 @@ class Model:
         timeout = float(self.cfg.get("requestTimeoutSeconds") or 900)
         if self.deadline:
             timeout = max(30.0, min(timeout, self.deadline - time.time()))
+        # Streamed, so the live line can count the answer as it is written. The answer is
+        # put back together into the same shape a plain reply has.
+        body = dict(body, stream=True, stream_options={"include_usage": True})
         req = urllib.request.Request(self.url + path, data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                return json.loads(r.read())
+                if "text/event-stream" not in (r.headers.get("Content-Type") or ""):
+                    return json.loads(r.read())  # a server that does not stream
+                return self._read_stream(r, time.time() + timeout)
         except urllib.error.HTTPError as e:
             # The server answered: a problem with this request (too long, ...), not the model.
             raise RuntimeError(f"the model refused the request ({e.code}: {e.read()[:200]!r})")
@@ -515,6 +530,45 @@ class Model:
             raise DocTimeout("the model took too long to answer")
         except (urllib.error.URLError, ConnectionError, http.client.HTTPException, OSError) as e:
             raise ModelUnavailable(f"the model is not answering ({e})")
+
+    def _read_stream(self, r, hard_deadline):
+        """Server-sent chunks -> {"choices": [{"message", "finish_reason"}], "usage", "timings"}.
+        A stream that keeps trickling still ends at the request's deadline."""
+        content, finish, usage, timings = [], None, {}, {}
+        tokens, noted = 0, time.time()
+        for raw in r:
+            if time.time() > hard_deadline:
+                raise TimeoutError("the answer took too long")
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:"):].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                chunk = json.loads(payload)
+            except ValueError:
+                continue
+            if chunk.get("error"):
+                raise RuntimeError(f"the model refused the request ({str(chunk['error'])[:200]})")
+            for choice in chunk.get("choices") or []:
+                delta = choice.get("delta") or {}
+                if delta.get("content"):
+                    content.append(delta["content"])
+                    tokens += 1
+                elif delta.get("reasoning_content"):
+                    tokens += 1
+                if choice.get("finish_reason"):
+                    finish = choice["finish_reason"]
+            usage = chunk.get("usage") or usage
+            timings = chunk.get("timings") or timings
+            if time.time() - noted >= TOKEN_NOTE_SECONDS:
+                wiki_events.update_now(tokens=tokens)
+                noted = time.time()
+        if finish is None and self.proc is not None and self.proc.poll() is not None:
+            raise ModelUnavailable("the model stopped while answering")
+        return {"choices": [{"message": {"content": "".join(content)}, "finish_reason": finish}],
+                "usage": usage, "timings": timings}
 
 
 # ==================================================================== schemas ====
@@ -656,6 +710,21 @@ class Run:
     current = ""  # the file being worked on, for events
 
 
+def say(phase, detail="", **fields):
+    """The Upload page's live line: what this file is going through right now."""
+    wiki_events.set_now(phase, file=Run.current, detail=detail, **fields)
+
+
+def model_name(path):
+    """Qwen_Qwen3.5-9B-Q4_K_M.gguf -> Qwen3.5-9B, for people."""
+    stem = re.sub(r"(?i)\.gguf$", "", os.path.basename(path or ""))
+    stem = re.sub(r"(?i)[-_.](q\d\w*|iq\d\w*|f16|bf16)$", "", stem)
+    stem = re.sub(r"^[A-Za-z]+_(?=[A-Za-z])", "", stem)  # the publisher's prefix
+    stem = re.sub(r"(?i)-instruct\b", "", stem)
+    stem = re.sub(r"(?i)-(\d+(?:\.\d+)?)b\b", lambda m: f"-{m.group(1)}B", stem)
+    return stem or "the model"
+
+
 def review(project, page, reason, lines):
     path = "wiki/_review.md"
     text_ = read(path).rstrip("\n") + "\n"
@@ -699,6 +768,7 @@ def process_document(model, wiki, src, sysmsg):
         return False
     wiki_events.emit("read", file=src)
     log(f"reading {src}")
+    say("read", "reading the converted text")
     fm, body = split_frontmatter(read(mirror))
     method, note = fm_get(fm, "method"), fm_get(fm, "note")
     if method == "ERROR" or note == "scanned-no-ocr" or not body.strip():
@@ -717,12 +787,16 @@ def process_document(model, wiki, src, sysmsg):
         for i, part in enumerate(parts, 1):
             if len(parts) > 1:
                 wiki_events.emit("progress", file=src, msg=f"Reading {name}, part {i} of {len(parts)}")
+                say("ask", "pulling out what it says", n=i, of=len(parts))
+            else:
+                say("ask", "pulling out what it says")
             q = (f"Document file name: {name}\n"
                  + (f"This is part {i} of {len(parts)}.\n" if len(parts) > 1 else "")
                  + "Extract what it states.\n\n<document>\n" + part + "\n</document>")
             results.append(model.ask(sysmsg, q, EXTRACT_SCHEMA, max_tokens=2000))
         d = merge_parts(results)
         if len(results) > 1:
+            say("ask", f"condensing the {len(results)} parts into one summary")
             points = "\n".join(f"- {p}" for p in d["summary"])
             c = model.ask(sysmsg, f"These are summary points from the parts of one document, {name}.\n"
                           "Write its title and a summary of at most 10 points.\n\n" + points,
@@ -733,6 +807,7 @@ def process_document(model, wiki, src, sysmsg):
         proj_list = projects()
         project = "general"
         if len(proj_list) > 1:
+            say("ask", "choosing its project folder")
             pick = model.ask(sysmsg, "Which project folder does this document belong to? Choose "
                              "'general' unless one clearly fits.\n\nProjects: " + ", ".join(proj_list)
                              + f"\n\nDocument: {d['title']}\n" + "\n".join(d["summary"][:6]),
@@ -745,7 +820,9 @@ def process_document(model, wiki, src, sysmsg):
         model.deadline = None
 
     # 2. ... then the writes, which need no model and cannot half-fail on a slow answer.
+    say("write", "writing its pages")
     write_document_pages(wiki, src, dest, project, d, plan, truncated, len(parts))
+    say("file", f"filing it in {os.path.dirname(dest)}")
     place(src, dest)
     wiki_events.emit("filed", file=src, to=dest)
     log(f"filed {src} -> {dest}")
@@ -820,9 +897,9 @@ def plan_entities(model, wiki, sysmsg, d, dest, body):
     """For each company and person: its page (existing or new), verified identifiers, its
     own facts, and contradictions with the existing page. Asks the model; writes nothing."""
     plan = []
-    for e in d["entities"]:
-        if e["kind"] not in ("company", "person"):
-            continue
+    people = [e for e in d["entities"] if e["kind"] in ("company", "person")]
+    checks = [e["name"] for e in people if d["facts"] and wiki.find_entity(e["name"], e["kind"])]
+    for e in people:
         rel = wiki.find_entity(e["name"], e["kind"])
         facts = [f for f in d["facts"] if f["about"] and norm_full(f["about"]) == norm_full(e["name"])]
         ids = {}
@@ -834,6 +911,8 @@ def plan_entities(model, wiki, sysmsg, d, dest, body):
                 ids.setdefault(kind, clean_line(i["value"], 80))
         conflicts = []
         if rel and d["facts"]:
+            say("check", f"checking {clean_line(e['name'], 60)} against its page",
+                n=checks.index(e["name"]) + 1 if e["name"] in checks else None, of=len(checks) or None)
             existing = split_frontmatter(read(rel))[1][:6000]
             new = "\n".join(f"- {f['about'] + ': ' if f['about'] else ''}{f['fact']}" for f in d["facts"])
             try:
@@ -1031,6 +1110,7 @@ def process_packet(model, wiki, src, sysmsg):
     Run.current = src
     wiki_events.emit("read", file=src)
     log(f"applying {src}")
+    say("apply", "reading the update")
     text_ = read(src)
     if "<<<<<<<" in text_ and ">>>>>>>" in text_:
         text_ = re.sub(r"^(<<<<<<<|=======|>>>>>>>).*$", "", text_, flags=re.M)
@@ -1041,8 +1121,10 @@ def process_packet(model, wiki, src, sysmsg):
         planned = [(p, plan_packet(model, wiki, p, sysmsg)) for p in packets]
     finally:
         model.deadline = None
+    say("write", "writing the update into the wiki")
     for p, (targets, unresolved) in planned:
         apply_packet(wiki, p, archived, targets, unresolved)
+    say("file", "archiving it")
     place(src, archived)
     wiki_events.emit("applied", file=src, to=archived)
     return True
@@ -1062,6 +1144,7 @@ def plan_packet(model, wiki, p, sysmsg):
                                                                   + " " + wiki.pages[x]["title"]).split())), x))
         cands = cands[:MAX_PAGE_CHOICES]
         if cands:
+            say("ask", "matching the pages it names")
             listing = "\n".join(f"- {c} ({clean_line(wiki.pages[c]['title'], 80)})" for c in cands)
             try:
                 ans = model.ask(sysmsg, "An update says it affects these pages: " + "; ".join(unresolved)
@@ -1213,6 +1296,7 @@ def main(argv=None):
     ap.add_argument("command", choices=["run", "check"])
     ap.add_argument("--server", help="use this llama-server URL instead of starting one")
     a = ap.parse_args(argv)
+    wiki_netguard.install()
     os.chdir(WIKI_DIR)
     server = a.server or os.environ.get("WIKI_LOCAL_SERVER_URL")  # tests
     if a.command == "check":

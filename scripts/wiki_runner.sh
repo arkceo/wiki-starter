@@ -21,7 +21,8 @@
 #   9. rebuilds the local site into public/ and shows a notification.
 #
 # Every step is also written to .wiki-engine/state/events.jsonl (scripts/wiki_events.py),
-# which the Upload page shows as per-file progress and a live log.
+# which the Upload page shows as per-file progress and a live log, and what is happening
+# at this moment to .wiki-engine/state/now.json, its live line.
 #
 # Claude runs with --permission-mode dontAsk and an explicit tool allowlist: it can read,
 # write and edit files in this folder and use mv/mkdir/ls, nothing else. Every call has a
@@ -71,6 +72,9 @@ log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"; [ -
 
 # One event for the Upload page: ev TYPE key=value ... (key:=json for numbers and lists).
 ev() { "$PY" scripts/wiki_events.py emit "$@" >> "$LOG_FILE" 2>&1 || true; }
+
+# What is happening right now, for the Upload page's live line: nowp PHASE key=value ...
+nowp() { "$PY" scripts/wiki_events.py now "$@" >> "$LOG_FILE" 2>&1 || true; }
 
 config_value() { # key default
   "$PY" - "$1" "$2" <<'PYEOF' 2>/dev/null || printf '%s' "$2"
@@ -129,6 +133,8 @@ acquire_lock() {
   date '+%H:%M' > "$LOCK_DIR/started"
 }
 release_lock() { rm -rf "$LOCK_DIR"; }
+# However a run ends, the live line must not keep describing a step that stopped.
+finish_run() { nowp idle; release_lock; }
 
 # --------------------------------------------------------- credentials ---------
 load_credentials() {
@@ -284,6 +290,7 @@ run_claude() { # label prompt-file max-turns
   command -v "$CLAUDE_BIN" >/dev/null 2>&1 || { log "claude not found on PATH"; return 127; }
   log "claude $label: start (max turns $turns, max spend \$$budget)"
   ev claude-start label="$label"
+  nowp think detail="starting Claude"
   : > "$stream"
   # Claude's actions stream to a file, and a follower turns them into events and log
   # lines. The watchdog below watches claude itself, never the follower.
@@ -410,6 +417,7 @@ confirm_done() { # before-snapshot after-snapshot
 
 # -------------------------------------------------------- tidy / commit --------
 tidy() {
+  nowp tidy detail="checking page headers and the ingestion register"
   "$PY" scripts/lint_frontmatter.py >> "$LOG_FILE" 2>&1 || log "lint_frontmatter failed"
   "$PY" scripts/build_ingestion_register.py >> "$LOG_FILE" 2>&1 || log "ingestion register failed"
   # Folders dropped into Intake leave empty shells behind once their files are filed.
@@ -420,6 +428,7 @@ commit_changes() { # message
   [ -d .git ] || return 0
   git add -A -- wiki index.md log.md archive generated >> "$LOG_FILE" 2>&1 || true
   if git diff --cached --quiet; then return 0; fi
+  nowp commit detail="recording this version in the wiki's history"
   git -c user.name="Wiki runner" -c user.email="runner@localhost" \
     commit -q -m "$1" >> "$LOG_FILE" 2>&1 && log "committed: $1" && ev committed msg="$1"
 }
@@ -432,6 +441,7 @@ build_site() {
   fi
   rm -rf "$next" "$old"
   ev build-start
+  nowp build detail="rebuilding the website"
   if "$NODE_BIN" quartz/bootstrap-cli.mjs build -d wiki -o "$next" >> "$LOG_FILE" 2>&1 \
      && [ -f "$next/index.html" ]; then
     # Swap in one step so the viewer never serves a half-built site.
@@ -468,7 +478,7 @@ if ! acquire_lock; then
   fi
   exit 0
 fi
-trap release_lock EXIT
+trap finish_run EXIT
 refresh_starter_pages
 
 if [ "$REBUILD_ONLY" = 1 ]; then
@@ -489,6 +499,7 @@ fi
 
 if [ "$SETTLE" = 1 ]; then
   ev waiting msg="Waiting for files to finish copying"
+  nowp settle detail="checking that every upload and copy has finished"
   wait_for_settle
 fi
 route_misfiled
@@ -513,7 +524,8 @@ ARCHIVED_BEFORE=$(find archive/inbox -type f -name '*.md' 2>/dev/null | wc -l | 
 CLAUDE_OK=1
 if [ "$N_DOCS" -gt 0 ]; then
   log "converting documents"
-  "$PY" scripts/to_markdown.py --only _intake 2>&1 | "$PY" scripts/wiki_events.py convert-stream
+  nowp convert of:="$N_DOCS" detail="converting documents to text"
+  "$PY" scripts/to_markdown.py --only _intake 2>&1 | "$PY" scripts/wiki_events.py convert-stream --total "$N_DOCS"
   [ "${PIPESTATUS[0]}" = 0 ] || log "to_markdown reported errors"
   if [ "$ENGINE" != local ]; then
     run_claude intake engine/prompts/intake.md 100 || CLAUDE_OK=0
@@ -584,6 +596,7 @@ else
 fi
 log "$RUN_ID: done ($DONE_DOCS document(s), $DONE_PACKETS packet(s))"
 ev run-end docs:="$DONE_DOCS" packets:="$DONE_PACKETS"
+nowp idle
 
 # Files dropped while this run was busy would otherwise wait for the 15-minute timer:
 # the folder watcher fired, found this run holding the lock, and gave up. Start another

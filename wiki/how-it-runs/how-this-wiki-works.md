@@ -22,8 +22,9 @@ Upload page; it sorts them into a queue inside the wiki folder:
 | Documents: PDF, Word, Excel, PowerPoint, images, scans | `raw/_intake/` | Converted to text (with OCR for scans), summarised into the right pages, then filed under `raw/<project>/` |
 | Update Packets (`.md`) from a Claude conversation | `raw/inbox/` | Applied to the affected pages, then moved to `archive/inbox/` |
 
-The same page shows every file's progress (uploaded, queued, converting, reading, filed)
-and a live log of what the wiki is doing. Files copied straight into those two folders in
+The same page shows every file going through its real stages (upload, convert, read and
+write, file), a live line saying what the wiki is doing at that moment, and a log of what
+it has done. Files copied straight into those two folders in
 Finder are processed the same way.
 
 ## What runs in the background
