@@ -377,6 +377,8 @@
     if (n.phase === "ask" && n.of > 1) out.push(`part ${n.n} of ${n.of}`)
     if (n.phase === "check" && n.n && n.of) out.push(`${n.n} of ${n.of}`)
     if (n.pages) out.push(`${n.pages} page${n.pages === 1 ? "" : "s"}`)
+    const b = /^(\d+)\/(\d+)$/.exec(n.batch || "")
+    if (b && Number(b[2]) > 1) out.push(`batch ${b[1]} of ${b[2]}`)
     if (n.tokens) out.push(`${fmtTokens(n.tokens)} tokens`)
     out.push(fmtElapsed(elapsed))
     return out.join(" · ")
@@ -468,6 +470,9 @@
         break
       }
       case "waiting": logLine(e.t, "Waiting for files to finish copying…"); break
+      case "batch":
+        if (e.of > 1) logLine(e.t, `Batch ${e.n} of ${e.of}: ${e.docs} document${e.docs === 1 ? "" : "s"}`)
+        break
       case "run-start":
         currentRun = e.run || ""
         logLine(e.t, `Started: ${e.docs || 0} document(s), ${e.packets || 0} packet(s)`); break
@@ -488,7 +493,7 @@
       }
       case "converted": { const r = row(f); if (RANK[r.state] <= RANK.ocr) setState(r, "converted", e.t); break }
       case "claude-start":
-        logLine(e.t, e.label === "intake" ? "Claude is reading the documents"
+        logLine(e.t, e.label && e.label.startsWith("intake") ? "Claude is reading the documents"
           : e.label && e.label.startsWith("ingest") ? "Claude is applying the Update Packets"
           : e.label === "local" ? "The model on this Mac is reading (nothing leaves the Mac)"
           : "Reading (" + (e.label || "engine") + ")"); break

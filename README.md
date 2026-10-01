@@ -62,6 +62,9 @@ If macOS shows **Background Items Added**, leave it allowed.
   (upload, convert, read and write, file), an "n of m done" count, a live line saying what
   the wiki is doing at that moment, and a log of what it has done. You get a notification
   when the wiki has been updated.
+- **Large uploads** are read in batches (8 documents at a time with Claude, 20 with the
+  model on this Mac). The first pages appear after the first batch, and the live line
+  shows which batch is being read.
 - **Process immediately:** press **Process now** on the Upload page.
 - **Ask questions** (Claude only): open the wiki folder in the Claude desktop app, or run
   `claude` in Terminal inside that folder.
@@ -89,6 +92,7 @@ skill, say "wrap up" at the end of a conversation, and upload the file it gives 
 | The Upload page says "Forbidden" | Reload the page. The wiki restarted, which an update does. |
 | "Claude could not run" | Paste the install line again and replace the sign-in. |
 | "The local model could not run" | Paste the install line again. It checks and repairs the model. |
+| "The model on this Mac stopped responding" | Nothing to do: the rest is read on the next run. A file it stops on twice is set aside in `raw/_needs-review/`. |
 | A file was moved to `raw/_needs-review/` | It failed twice. Check that it opens, then upload it again. |
 | No notifications appear | Open System Settings → Notifications → **Script Editor** and allow notifications. |
 | macOS asks to let "Python" find devices on local networks | Choose **Don't Allow**. The wiki only talks to this Mac and works either way. |

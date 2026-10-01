@@ -2,6 +2,19 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Large uploads in batches
+- Documents are now read in batches: 8 at a time with Claude, 20 with the model on this
+  Mac. Each batch is converted and read before the next, so a large upload is read in
+  full and its first pages appear within minutes instead of at the end.
+- A document only counts as tried if its batch actually ran. Before, a large upload could
+  leave unread documents set aside in `raw/_needs-review/` as if they had failed.
+- With Claude, each batch has its own spending cap (default US$5, now
+  `maxSpendPerBatchUsd`; an existing `maxSpendPerRunUsd` setting still applies), and
+  stopping at a cap no longer says "Claude could not run".
+- With the model on this Mac, a long upload is no longer cut off after 6 hours. The model
+  is stopped only if it shows no progress for 20 minutes, and the notice says so. Claude
+  is never started and no Anthropic account is used.
+
 ## Live progress
 - The Upload page has a live line that says what the wiki is doing at this moment: which
   file, which step (converting, reading a scan, asking the model, writing pages, filing),

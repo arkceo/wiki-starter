@@ -23,6 +23,7 @@ Examples:
   python3 scripts/to_markdown.py --only _intake           # just one subtree
   python3 scripts/to_markdown.py --out /tmp/md --limit 20 # dry-ish trial elsewhere
   python3 scripts/to_markdown.py --ocr off                # skip OCR (digital + Office only)
+  python3 scripts/to_markdown.py --list batch.txt         # only the sources named in a file
 """
 import argparse, contextlib, datetime, hashlib, logging, os, shutil, subprocess, sys, tempfile
 
@@ -75,7 +76,14 @@ def main():
     ap.add_argument("--only", default="", help="only process source paths containing this substring")
     ap.add_argument("--max-ocr-pages", type=int, default=0,
                     help="defer (skip, don't write) scanned PDFs with more than N pages; 0 = no limit")
+    ap.add_argument("--list", default="",
+                    help="only process the sources named in this file, one path per line")
     a = ap.parse_args()
+    wanted = None
+    if a.list:
+        root = os.path.abspath(a.root)
+        with open(a.list, encoding="utf-8") as f:
+            wanted = {os.path.relpath(os.path.abspath(p.strip()), root) for p in f if p.strip()}
 
     from markitdown import MarkItDown
     md = MarkItDown(enable_plugins=False)
@@ -94,6 +102,8 @@ def main():
             if ext in SKIP_EXT or (a.only and a.only not in src):
                 continue
             rel = os.path.relpath(src, a.root)
+            if wanted is not None and rel not in wanted:
+                continue
             outp = os.path.join(a.out, rel + ".md")
             os.makedirs(os.path.dirname(outp), exist_ok=True)
 

@@ -33,7 +33,10 @@ is escaped, so neither a model mistake nor a hostile document can break the site
 markup in it.
 
 Usage:
-  local_engine.py run [--server URL]   process everything waiting (the runner calls this)
+  local_engine.py run [--server URL]   process everything waiting
+  local_engine.py run --docs FILE      only the documents listed in FILE (one batch; the
+                                       runner calls this), no Update Packets
+  local_engine.py run --packets        only the Update Packets
   local_engine.py check                start the model and ask one question (installer)
 
 Exit status: 0 all done; 1 some files failed (they stay queued and are retried, then set
@@ -1236,9 +1239,11 @@ def load_config():
         return {}
 
 
-def run(server=None):
-    docs = pending("raw/_intake")
-    packets = [p for p in pending("raw/inbox") if p.endswith((".md", ".markdown"))]
+def run(server=None, only_docs=None, packets_only=False):
+    docs = [] if packets_only else pending("raw/_intake")
+    if only_docs is not None:
+        docs = [d for d in docs if d in only_docs]
+    packets = [] if only_docs is not None else [p for p in pending("raw/inbox") if p.endswith((".md", ".markdown"))]
     if not docs and not packets:
         return 0
     cfg = load_config().get("localModel") or {}
@@ -1295,13 +1300,19 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Build the wiki with a local model.")
     ap.add_argument("command", choices=["run", "check"])
     ap.add_argument("--server", help="use this llama-server URL instead of starting one")
+    ap.add_argument("--docs", help="run: only the documents listed in this file, no packets")
+    ap.add_argument("--packets", action="store_true", help="run: only the Update Packets")
     a = ap.parse_args(argv)
     wiki_netguard.install()
     os.chdir(WIKI_DIR)
     server = a.server or os.environ.get("WIKI_LOCAL_SERVER_URL")  # tests
     if a.command == "check":
         return check(server)
-    return run(server)
+    only_docs = None
+    if a.docs:
+        with open(a.docs, encoding="utf-8") as f:
+            only_docs = {line.strip() for line in f if line.strip()}
+    return run(server, only_docs=only_docs, packets_only=a.packets)
 
 
 if __name__ == "__main__":

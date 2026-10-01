@@ -10,11 +10,15 @@
 #   2. waits until dropped files have finished copying;
 #   3. routes misfiled drops (a PDF in the Inbox goes to Intake; a packet in Intake
 #      goes to the Inbox);
-#   4. converts new documents to Markdown (scripts/to_markdown.py) and has Claude file
-#      them (engine/prompts/intake.md);
+#   4. reads new documents in batches (docsPerBatch in wiki.config.json: 8 with Claude,
+#      20 with the model on this Mac): each batch is converted to Markdown
+#      (scripts/to_markdown.py) and then filed by Claude (engine/prompts/intake.md)
+#      before the next batch starts, so a large drop never outgrows one call's caps and
+#      pages appear while it is still going;
 #   5. has Claude apply Update Packets, five at a time (engine/prompts/ingest.md);
 #   6. parks anything that failed twice in raw/_needs-review/ and says so in
-#      wiki/_review.md, so a broken file never burns money every 15 minutes;
+#      wiki/_review.md, so a broken file never burns money every 15 minutes (only a
+#      batch that actually ran counts as a try for its files);
 #   7. records newly filed documents in archive/ingestion-ledger.csv, tidies
 #      frontmatter, refreshes the ingestion register;
 #   8. commits the change to the folder's local git history (never pushed anywhere);
@@ -25,12 +29,13 @@
 # at this moment to .wiki-engine/state/now.json, its live line.
 #
 # Claude runs with --permission-mode dontAsk and an explicit tool allowlist: it can read,
-# write and edit files in this folder and use mv/mkdir/ls, nothing else. Every call has a
-# turn cap, a spending cap and a wall-clock watchdog.
+# write and edit files in this folder and use mv/mkdir/ls, nothing else. Every call (one
+# batch) has a turn cap, a spending cap (maxSpendPerBatchUsd) and a wall-clock watchdog.
 #
 # With "engine": "local" in wiki.config.json, steps 4 and 5 are done instead by
-# scripts/local_engine.py with a model running on this Mac (nothing leaves it), under its
-# own watchdog.
+# scripts/local_engine.py with a model running on this Mac, batch by batch, under a
+# watchdog that stops it only when it shows no progress. Nothing leaves the Mac: no
+# credentials are loaded, and Claude is never started.
 #
 # Usage: wiki_runner.sh [--rebuild] [--no-settle]
 #   --rebuild    only rebuild the site (used by the installer and the updater)
@@ -61,7 +66,8 @@ SETTLE_MAX_SECONDS="${WIKI_SETTLE_MAX_SECONDS:-600}"
 MAX_INGEST_ROUNDS="${WIKI_MAX_INGEST_ROUNDS:-10}"
 MAX_ATTEMPTS="${WIKI_MAX_ATTEMPTS:-2}"
 CLAUDE_TIMEOUT_SECONDS="${WIKI_CLAUDE_TIMEOUT_SECONDS:-2400}"
-LOCAL_TIMEOUT_SECONDS="${WIKI_LOCAL_TIMEOUT_SECONDS:-21600}"
+LOCAL_TIMEOUT_SECONDS="${WIKI_LOCAL_TIMEOUT_SECONDS:-21600}"   # one batch, in all
+LOCAL_STALL_SECONDS="${WIKI_LOCAL_STALL_SECONDS:-1200}"        # no sign of progress
 ERROR_NOTIFY_EVERY_SECONDS="${WIKI_ERROR_NOTIFY_EVERY_SECONDS:-21600}"
 
 ALLOWED_TOOLS="Read,Glob,Grep,Edit,Write,Bash(mv *),Bash(mkdir *),Bash(ls *)"
@@ -283,10 +289,39 @@ snapshot_filed_sources() {
 }
 
 # ------------------------------------------------------------- claude ----------
+# Claude's own verdict on a finished call: success, error_max_turns, ... ("" if none).
+claude_outcome() { # stream-file
+  "$PY" - "$1" <<'PYEOF' 2>/dev/null
+import json, sys
+outcome = ""
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    try:
+        m = json.loads(line)
+    except ValueError:
+        continue
+    if isinstance(m, dict) and m.get("type") == "result":
+        outcome = m.get("subtype") or ""
+print(outcome, end="")
+PYEOF
+}
+
+# The file the live line says is being worked on (the one in progress when a step hung).
+now_file() {
+  "$PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("file", ""), end="")' \
+    "$STATE_DIR/now.json" 2>/dev/null
+}
+
+# One Claude call. Returns 0 done; 3 stopped at its turn or spending cap (it ran, so its
+# files count as tried); 4 stopped by the watchdog; 1 Claude could not run.
 run_claude() { # label prompt-file max-turns
-  local label="$1" prompt_file="$2" turns="$3" budget pid fpid waited=0 rc
+  local label="$1" prompt_file="$2" turns="$3" budget pid fpid waited=0 rc outcome stopped=0
   local stream="$STATE_DIR/claude-stream.jsonl"
-  budget=$(config_value maxSpendPerRunUsd 5)
+  # A wiki that reads with the model on this Mac never sends anything to Anthropic.
+  if [ "$ENGINE" = local ]; then
+    log "claude $label: refused, this wiki reads with the model on this Mac"
+    return 1
+  fi
+  budget=$(config_value maxSpendPerBatchUsd "$(config_value maxSpendPerRunUsd 5)")
   command -v "$CLAUDE_BIN" >/dev/null 2>&1 || { log "claude not found on PATH"; return 127; }
   log "claude $label: start (max turns $turns, max spend \$$budget)"
   ev claude-start label="$label"
@@ -309,48 +344,86 @@ run_claude() { # label prompt-file max-turns
     sleep 5; waited=$((waited + 5))
     if [ "$waited" -ge "$CLAUDE_TIMEOUT_SECONDS" ]; then
       log "claude $label: watchdog stopped it after ${waited}s"
+      STALLED_ON=$(now_file)
       kill "$pid" 2>/dev/null; sleep 5; kill -9 "$pid" 2>/dev/null
+      stopped=1
       break
     fi
   done
   wait "$pid" 2>/dev/null; rc=$?
   wait "$fpid" 2>/dev/null
-  log "claude $label: exit $rc after ${waited}s"
-  return "$rc"
+  outcome=$(claude_outcome "$stream")
+  log "claude $label: exit $rc after ${waited}s (${outcome:-no result})"
+  [ "$stopped" = 1 ] && return 4
+  case "$outcome" in
+    success) return 0 ;;
+    error_max*) log "claude $label: stopped at its cap; the files it did not reach count as tried"; return 3 ;;
+  esac
+  [ "$rc" = 0 ] && return 0
+  return 1
 }
 
 # ---------------------------------------------------------- local model ---------
-run_local() { # everything waiting, in one run of scripts/local_engine.py
-  local pid waited=0 rc
-  log "local model: start"
-  "$PY" scripts/local_engine.py run >> "$LOG_FILE" 2>&1 < /dev/null &
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || date +%s; }
+
+# One run of scripts/local_engine.py (one batch, or the packets). Returns 0 done (1 from
+# the engine means some files failed: they stay queued and count a try, like any file);
+# 2 the model could not run; 4 stopped by the watchdog. The model streams its answers and
+# every step updates the live line, so "no progress" is the live line not changing for
+# LOCAL_STALL_SECONDS: a slow Mac is never cut off, a hung model is.
+run_local() { # local_engine.py run arguments
+  local pid waited=0 rc idle stopped=0
+  log "local model: start ($*)"
+  "$PY" scripts/local_engine.py run "$@" >> "$LOG_FILE" 2>&1 < /dev/null &
   pid=$!
   while kill -0 "$pid" 2>/dev/null; do
     sleep 5; waited=$((waited + 5))
-    if [ "$waited" -ge "$LOCAL_TIMEOUT_SECONDS" ]; then
-      log "local model: watchdog stopped it after ${waited}s"
+    idle=$(( $(date +%s) - $(mtime "$STATE_DIR/now.json") ))
+    if [ "$idle" -ge "$LOCAL_STALL_SECONDS" ] || [ "$waited" -ge "$LOCAL_TIMEOUT_SECONDS" ]; then
+      log "local model: watchdog stopped it after ${waited}s (no progress for ${idle}s)"
+      STALLED_ON=$(now_file)
       kill "$pid" 2>/dev/null; sleep 40
       pkill -P "$pid" 2>/dev/null   # the model server, if it outlived its parent
       kill -9 "$pid" 2>/dev/null
+      stopped=1
       break
     fi
   done
   wait "$pid" 2>/dev/null; rc=$?
   log "local model: exit $rc after ${waited}s"
-  # 1 means some files failed: they stay queued and count an attempt, like any file.
-  [ "$rc" -le 1 ]
+  [ "$stopped" = 1 ] && return 4
+  [ "$rc" -le 1 ] && return 0
+  return 2
 }
 
 # ------------------------------------------------------------ attempts ---------
-# One line per pending item: "<count><TAB><path>". An item still pending after
-# MAX_ATTEMPTS successful Claude runs is parked in raw/_needs-review/.
-bump_attempts() { # newline-separated paths still pending after a successful run
-  local still="$1" tmp="$STATE_DIR/attempts.new" p n
-  : > "$tmp"
-  [ -n "$still" ] && printf '%s\n' "$still" | while IFS= read -r p; do
-    n=$(awk -F '\t' -v p="$p" '$2 == p { print $1 }' "$ATTEMPTS_FILE" 2>/dev/null | head -1)
-    printf '%s\t%s\n' "$(( ${n:-0} + 1 ))" "$p" >> "$tmp"
-  done
+# One line per waiting item that has been tried: "<count><TAB><path>". A file tried this
+# run and still waiting counts one more; one not tried this run (its batch never ran)
+# keeps its count; one no longer waiting is forgotten. An item still waiting after
+# MAX_ATTEMPTS tries is parked in raw/_needs-review/.
+bump_attempts() { # file listing the paths tried this run
+  local tmp="$STATE_DIR/attempts.new"
+  { list_pending raw/_intake; list_pending raw/inbox; } > "$STATE_DIR/pending.now"
+  "$PY" - "$ATTEMPTS_FILE" "$1" "$STATE_DIR/pending.now" "$tmp" <<'PYEOF' || return 0
+import sys
+old, tried, pending, out = sys.argv[1:5]
+def lines(path):
+    try:
+        return [l.rstrip("\n") for l in open(path, encoding="utf-8") if l.strip()]
+    except OSError:
+        return []
+counts = {}
+for line in lines(old):
+    n, _, path = line.partition("\t")
+    if path and n.isdigit():
+        counts[path] = int(n)
+tried = set(lines(tried))
+with open(out, "w", encoding="utf-8") as f:
+    for path in sorted(set(lines(pending))):
+        n = counts.get(path, 0) + (1 if path in tried else 0)
+        if n:
+            f.write(f"{n}\t{path}\n")
+PYEOF
   mv "$tmp" "$ATTEMPTS_FILE"
 }
 
@@ -377,7 +450,6 @@ park_repeat_failures() {
   done < "$ATTEMPTS_FILE"
   if [ "$parked" -gt 0 ]; then
     notify "Wiki needs attention" "$parked file(s) could not be processed and were moved to raw/_needs-review. See the Review queue."
-    : > "$ATTEMPTS_FILE"
   fi
 }
 
@@ -458,6 +530,13 @@ build_site() {
   return 1
 }
 
+# The intake instructions, limited to one batch.
+batch_prompt() { # batch-file
+  cat engine/prompts/intake.md
+  printf '\nThis run is one batch of a larger upload. Process ONLY these documents, and leave every other file in raw/_intake/ exactly where it is (later batches handle them):\n\n'
+  sed 's/^/- /' "$1"
+}
+
 # ---------------------------------------------------------------- main ---------
 REBUILD_ONLY=0
 SETTLE=1
@@ -510,31 +589,69 @@ DOCS_BEFORE=$(list_pending raw/_intake)
 PACKETS_BEFORE=$(list_pending raw/inbox)
 N_DOCS=$(count_lines "$DOCS_BEFORE")
 N_PACKETS=$(count_lines "$PACKETS_BEFORE")
+BATCH_SIZE=$(config_value docsPerBatch "")
+case "$BATCH_SIZE" in ''|*[!0-9]*|0) if [ "$ENGINE" = local ]; then BATCH_SIZE=20; else BATCH_SIZE=8; fi ;; esac
+BATCH_DIR="$STATE_DIR/batches"; TRIED="$STATE_DIR/tried.txt"
+rm -rf "$BATCH_DIR"; mkdir -p "$BATCH_DIR"; : > "$TRIED"
+[ -n "$DOCS_BEFORE" ] && printf '%s\n' "$DOCS_BEFORE" | split -a 4 -l "$BATCH_SIZE" - "$BATCH_DIR/batch."
+N_BATCHES=$(ls "$BATCH_DIR" | wc -l | tr -d ' ')
 log "$RUN_ID: $N_DOCS document(s), $N_PACKETS packet(s) waiting"
 ev run-start docs:="$N_DOCS" packets:="$N_PACKETS"
 printf '%s\n%s\n' "$DOCS_BEFORE" "$PACKETS_BEFORE" | sed '/^$/d' | while IFS= read -r p; do
   ev queued file="$p"
 done
-notify "Wiki is working" "Reading $N_DOCS document(s) and $N_PACKETS packet(s). This can take a few minutes; another notice follows when it is done."
+BATCH_NOTE=""; [ "$N_BATCHES" -gt 1 ] && BATCH_NOTE=" in $N_BATCHES batches"
+notify "Wiki is working" "Reading $N_DOCS document(s)$BATCH_NOTE and $N_PACKETS packet(s). This can take a while; another notice follows when it is done."
 
 SNAP_BEFORE="$STATE_DIR/snap.before"; SNAP_AFTER="$STATE_DIR/snap.after"
 snapshot_filed_sources > "$SNAP_BEFORE"
 ARCHIVED_BEFORE=$(find archive/inbox -type f -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
 
-CLAUDE_OK=1
-if [ "$N_DOCS" -gt 0 ]; then
-  log "converting documents"
+# Documents, batch by batch: convert the batch, read it, then the next. A batch that ran
+# (even one stopped at Claude's cap) counts as a try for its files; a batch that never ran
+# counts nothing. Claude or the model failing outright stops the run; so does a hang, which
+# counts a try only for the file it hung on.
+CLAUDE_OK=1; STOP=""; STALLED_ON=""
+k=0; started=0
+for bf in "$BATCH_DIR"/batch.*; do
+  [ -f "$bf" ] || continue
+  k=$((k + 1))
+  n=$(wc -l < "$bf" | tr -d ' ')
+  [ "$N_BATCHES" -gt 1 ] && export WIKI_BATCH="$k/$N_BATCHES"
+  log "batch $k of $N_BATCHES: $n document(s)"
+  ev batch n:="$k" of:="$N_BATCHES" docs:="$n"
   nowp convert of:="$N_DOCS" detail="converting documents to text"
-  "$PY" scripts/to_markdown.py --only _intake 2>&1 | "$PY" scripts/wiki_events.py convert-stream --total "$N_DOCS"
+  "$PY" scripts/to_markdown.py --only _intake --list "$bf" 2>&1 \
+    | "$PY" scripts/wiki_events.py convert-stream --total "$N_DOCS" --start "$started"
   [ "${PIPESTATUS[0]}" = 0 ] || log "to_markdown reported errors"
-  if [ "$ENGINE" != local ]; then
-    run_claude intake engine/prompts/intake.md 100 || CLAUDE_OK=0
+  started=$((started + n))
+  if [ "$ENGINE" = local ]; then
+    run_local --docs "$bf"; rc=$?
+  else
+    batch_prompt "$bf" > "$STATE_DIR/intake-batch.md"
+    run_claude "intake#$k" "$STATE_DIR/intake-batch.md" 100; rc=$?
   fi
-fi
+  case "$rc" in
+    0|3) cat "$bf" >> "$TRIED" ;;
+    4) if [ -n "$STALLED_ON" ]; then printf '%s\n' "$STALLED_ON" >> "$TRIED"; else cat "$bf" >> "$TRIED"; fi
+       STOP=stalled; CLAUDE_OK=0; break ;;
+    *) STOP=engine; CLAUDE_OK=0; break ;;
+  esac
+done
+unset WIKI_BATCH
 
+# Update Packets, after the documents.
 if [ "$ENGINE" = local ]; then
-  run_local || CLAUDE_OK=0
-  MAX_INGEST_ROUNDS=0   # the local engine applies the packets in the same run
+  MAX_INGEST_ROUNDS=0   # the model on this Mac applies them in one call
+  if [ "$CLAUDE_OK" = 1 ] && [ -n "$(list_packets)" ]; then
+    LOCAL_PACKETS=$(list_packets)
+    run_local --packets; rc=$?
+    case "$rc" in
+      0) printf '%s\n' "$LOCAL_PACKETS" >> "$TRIED" ;;
+      4) [ -n "$STALLED_ON" ] && printf '%s\n' "$STALLED_ON" >> "$TRIED"; STOP=stalled; CLAUDE_OK=0 ;;
+      *) STOP=engine; CLAUDE_OK=0 ;;
+    esac
+  fi
 fi
 
 round=0
@@ -542,7 +659,12 @@ while [ "$CLAUDE_OK" = 1 ] && [ "$round" -lt "$MAX_INGEST_ROUNDS" ]; do
   ROUND_PACKETS=$(list_packets)
   [ -n "$ROUND_PACKETS" ] || break
   round=$((round + 1))
-  run_claude "ingest#$round" engine/prompts/ingest.md 60 || { CLAUDE_OK=0; break; }
+  run_claude "ingest#$round" engine/prompts/ingest.md 60; rc=$?
+  case "$rc" in
+    0|3) printf '%s\n' "$ROUND_PACKETS" >> "$TRIED" ;;
+    4) printf '%s\n' "$ROUND_PACKETS" >> "$TRIED"; STOP=stalled; CLAUDE_OK=0; break ;;
+    *) STOP=engine; CLAUDE_OK=0; break ;;
+  esac
   # Progress means packets that were waiting at the start of this round are gone;
   # files dropped meanwhile do not count against it.
   remaining=0
@@ -557,23 +679,21 @@ ROUND
   fi
 done
 
-STILL="$(list_pending raw/_intake)"
-P_STILL="$(list_pending raw/inbox)"
-[ -n "$P_STILL" ] && STILL="$(printf '%s\n%s' "$STILL" "$P_STILL" | sed '/^$/d')"
-if [ "$CLAUDE_OK" = 1 ]; then
-  # Count an attempt only against files that were waiting when this run started.
-  ATTEMPTED=$(printf '%s\n%s\n' "$DOCS_BEFORE" "$PACKETS_BEFORE" | sed '/^$/d' | LC_ALL=C sort)
-  STILL_ATTEMPTED=$(printf '%s\n' "$STILL" | sed '/^$/d' | LC_ALL=C sort | LC_ALL=C comm -12 - <(printf '%s\n' "$ATTEMPTED"))
-  bump_attempts "$STILL_ATTEMPTED"
-  park_repeat_failures
-  printf '%s\n' "$STILL_ATTEMPTED" | sed '/^$/d' | while IFS= read -r p; do
-    [ -f "$p" ] && ev retry file="$p"
-  done
-elif [ "$ENGINE" = local ]; then
-  notify_error "The local model could not run. See ~/Library/Logs/wiki-starter/runner.log, or run the installer again to repair it."
-else
-  notify_error "Claude could not run. Check your Anthropic sign-in (run the installer again), then press Process now on the Upload page."
-fi
+# Tries: only files in what actually ran.
+bump_attempts "$TRIED"
+park_repeat_failures
+STILL_TRIED=$( { list_pending raw/_intake; list_pending raw/inbox; } | LC_ALL=C sort \
+  | LC_ALL=C comm -12 - <(sed '/^$/d' "$TRIED" | LC_ALL=C sort -u) )
+printf '%s\n' "$STILL_TRIED" | sed '/^$/d' | while IFS= read -r p; do
+  [ -f "$p" ] && ev retry file="$p"
+done
+LEFT=$(( $(count_lines "$(list_pending raw/_intake)") ))
+case "$STOP:$ENGINE" in
+  engine:local) notify_error "The local model could not run. See ~/Library/Logs/wiki-starter/runner.log, or run the installer again to repair it." ;;
+  engine:*) notify_error "Claude could not run. Check your Anthropic sign-in (run the installer again), then press Process now on the Upload page." ;;
+  stalled:local) notify_error "The model on this Mac stopped responding${STALLED_ON:+ while reading $(basename "$STALLED_ON")}. The $LEFT document(s) still waiting will be read on the next run." ;;
+  stalled:*) notify_error "Claude stopped responding during a batch. The $LEFT document(s) still waiting will be read on the next run." ;;
+esac
 
 snapshot_filed_sources > "$SNAP_AFTER"
 append_ledger "$SNAP_BEFORE" "$SNAP_AFTER" "$RUN_ID"

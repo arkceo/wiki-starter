@@ -20,10 +20,10 @@ progress and a live log. Standard library only.
       Actions are reported only once their tool call succeeded. Plain-language lines also
       go to the runner log.
 
-  wiki_events.py convert-stream [--total N]
+  wiki_events.py convert-stream [--total N] [--start K]
       Read scripts/to_markdown.py output on stdin, copy it to the runner log, and emit a
       convert event for each document it starts converting and a converted event when it
-      is done.
+      is done. --start: documents converted in earlier batches, so numbering runs on.
 
   wiki_events.py now PHASE [key=value ...] [key:=json ...]
       Say what is happening right now (see set_now).
@@ -115,6 +115,9 @@ def set_now(phase, **fields):
     run = os.environ.get("WIKI_RUN_ID")
     if run and phase != "idle":
         rec["run"] = run
+    batch = os.environ.get("WIKI_BATCH")  # "2/22" while the runner reads in batches
+    if batch and phase != "idle":
+        rec.setdefault("batch", batch)
     same = all(prev.get(k) == rec.get(k) for k in ("phase", "file", "detail"))
     rec["since"] = prev.get("since") if same and prev.get("since") else t
     try:
@@ -350,8 +353,8 @@ def ignored_name(name):
             or name.endswith((".download", ".crdownload", ".part", ".partial", ".tmp")))
 
 
-def convert_stream(stream=sys.stdin, total=0):
-    current, seen = "", 0
+def convert_stream(stream=sys.stdin, total=0, start=0):
+    current, seen = "", start
     for line in stream:
         log(line.rstrip("\n"))
         s = line.strip()
@@ -387,6 +390,7 @@ def main(argv=None):
     c.add_argument("--label", default="")
     cs = sub.add_parser("convert-stream")
     cs.add_argument("--total", type=int, default=0)
+    cs.add_argument("--start", type=int, default=0)
     n = sub.add_parser("now")
     n.add_argument("type")
     n.add_argument("fields", nargs="*")
@@ -409,7 +413,7 @@ def main(argv=None):
     elif a.cmd == "claude-stream":
         follow(a.file, a.pid, a.label)
     else:
-        convert_stream(total=a.total)
+        convert_stream(total=a.total, start=a.start)
 
 
 if __name__ == "__main__":

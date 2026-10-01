@@ -33,12 +33,15 @@ Two background agents start when you log in:
 
 - **The runner** (`scripts/wiki_runner.sh`) wakes when something lands in the queue,
   and every 15 minutes in case it missed one. It waits until files finish copying, then:
-  1. converts new documents to Markdown (`scripts/to_markdown.py`, see
-     [[raw-to-markdown-conversion]]);
-  2. runs Claude on the documents, then on the packets, five packets at a time (or the
-     model on this Mac, `scripts/local_engine.py`, which writes a summary page per
-     document under `sources/`, pages for the companies and people it names, and one
-     page per packet under `updates/` or `decisions/`);
+  1. takes new documents in batches (8 at a time with Claude, 20 with the model on this
+     Mac; `docsPerBatch` in `wiki.config.json`), so a large upload is read in full and
+     its first pages appear while the rest are still waiting;
+  2. converts each batch to Markdown (`scripts/to_markdown.py`, see
+     [[raw-to-markdown-conversion]]) and reads it: Claude, or the model on this Mac
+     (`scripts/local_engine.py`, which writes a summary page per document under
+     `sources/` and pages for the companies and people it names). Then the packets,
+     five at a time with Claude (one page each under `updates/` or `decisions/`). With
+     the model on this Mac, Claude is never started and nothing leaves the Mac;
   3. tidies frontmatter, refreshes the [[ingestion-register]] and commits the change to
      the folder's local history (git, on this Mac only);
   4. rebuilds the site and shows a notification.

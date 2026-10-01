@@ -266,7 +266,7 @@ except Exception:
 cfg["title"] = os.environ["WIKI_TITLE_V"]
 cfg["company"] = os.environ["WIKI_COMPANY_V"]
 cfg["port"] = int(os.environ["WIKI_PORT_V"])
-cfg.setdefault("maxSpendPerRunUsd", 5)
+cfg.setdefault("maxSpendPerBatchUsd", 5)
 json.dump(cfg, open("wiki.config.json", "w"), indent=2)
 open("wiki.config.json", "a").write("\n")
 company = os.environ["WIKI_COMPANY_V"]

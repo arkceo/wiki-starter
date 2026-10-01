@@ -83,8 +83,9 @@ If anything fails, run the same line again. Finished steps are skipped.
   frees the memory when it is done.
 - **Subscription:** processing counts against your plan's usage limits.
 - **API key:** you pay per use. A typical document costs cents; a long scanned contract
-  can cost more. Each run is capped (default US$5, `maxSpendPerRunUsd` in
-  `wiki.config.json`), and a file that fails twice is set aside instead of retried.
+  can cost more. Documents are read 8 at a time, and each batch is capped (default
+  US$5, `maxSpendPerBatchUsd` in `wiki.config.json`), so a large upload costs in
+  proportion to its size. A file that fails twice is set aside instead of retried.
 - Everything else is free.
 
 ## Privacy
@@ -95,7 +96,8 @@ If anything fails, run the same line again. Finished steps are skipped.
   devices. If macOS asks whether "Python" may find devices on your local network, choose
   **Don't Allow**; everything keeps working.
 - With Claude, the text Claude reads while working is sent to Anthropic to be processed.
-  With the model on this Mac, nothing leaves the Mac.
+  With the model on this Mac, nothing leaves the Mac: Claude is never started and no
+  Anthropic account is used.
 - Source documents are not kept in the wiki's git history. **Turn on Time Machine.**
 
 ## Claude or the model on this Mac?

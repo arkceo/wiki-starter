@@ -3,5 +3,5 @@
   "company": "",
   "port": 8765,
   "engine": "claude",
-  "maxSpendPerRunUsd": 5
+  "maxSpendPerBatchUsd": 5
 }
