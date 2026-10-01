@@ -1,0 +1,181 @@
+@use "../../styles/variables.scss" as *;
+
+/**
+ * Facts — canonical fact card.
+ *
+ * Reads as a table on desktop and as a stack of thumb-sized rows on a phone. The value is
+ * the button: the whole row target is what makes "copy one fact" a single deliberate tap
+ * rather than a press-and-hold text selection.
+ */
+
+.wiki-facts {
+  margin: 1.5rem 0 2rem;
+  border: 1px solid var(--lightgray);
+  border-radius: 10px;
+  background: var(--light);
+  overflow: hidden;
+}
+
+.wiki-facts > .wiki-facts-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.9rem;
+  border-bottom: 1px solid var(--lightgray);
+  background: color-mix(in srgb, var(--lightgray) 28%, var(--light));
+}
+
+.wiki-facts > .wiki-facts-head > h2 {
+  flex: 1 1 auto;
+  margin: 0;
+  font-family: var(--headerFont);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--darkgray);
+}
+
+.wiki-facts .wiki-facts-all {
+  min-height: 32px;
+  padding: 0 0.65rem;
+  border: 1px solid var(--lightgray);
+  border-radius: 7px;
+  background: var(--light);
+  color: var(--secondary);
+  font-family: var(--bodyFont);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.wiki-facts .wiki-facts-list {
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: minmax(9rem, auto) minmax(0, 1fr);
+}
+
+.wiki-facts .wiki-fact {
+  display: contents;
+}
+
+.wiki-facts .wiki-fact > dt,
+.wiki-facts .wiki-fact > dd {
+  margin: 0;
+  padding: 0.5rem 0.9rem;
+  border-top: 1px solid color-mix(in srgb, var(--lightgray) 60%, transparent);
+  min-width: 0;
+}
+
+.wiki-facts .wiki-fact > dt {
+  font-size: 0.83rem;
+  color: var(--gray);
+  align-self: center;
+}
+
+.wiki-facts .wiki-fact > dd {
+  padding-left: 0;
+}
+
+.wiki-facts .wiki-fact-value {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  width: 100%;
+  min-height: 28px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  font-family: var(--bodyFont);
+  font-size: 0.95rem;
+  color: var(--dark);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  overflow-wrap: anywhere;
+}
+
+.wiki-facts .wiki-fact-value:hover .wiki-fact-text,
+.wiki-facts .wiki-fact-value:focus-visible .wiki-fact-text {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+// The copy mark is drawn in CSS so the card carries no icon payload.
+.wiki-facts .wiki-fact-mark {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+  border: 1.4px solid var(--gray);
+  border-radius: 2px;
+  box-shadow: 2.5px -2.5px 0 -1.4px var(--light), 3.9px -3.9px 0 -2.5px var(--gray);
+  opacity: 0.55;
+  transition: opacity 0.15s ease;
+}
+
+.wiki-facts .wiki-fact-value:hover .wiki-fact-mark {
+  opacity: 1;
+}
+
+.wiki-facts .wiki-fact.copied > dd .wiki-fact-value {
+  color: var(--secondary);
+}
+
+.wiki-facts .wiki-fact.copied > dd .wiki-fact-mark {
+  border-color: var(--secondary);
+  box-shadow: none;
+  border-width: 0 1.6px 1.6px 0;
+  border-radius: 0;
+  width: 5px;
+  height: 10px;
+  transform: rotate(42deg) translate(-1px, -1px);
+  opacity: 1;
+}
+
+.wiki-facts .wiki-facts-all.copied {
+  color: var(--tertiary);
+  border-color: var(--tertiary);
+}
+
+.wiki-facts .wiki-facts-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+// ---- phone -----------------------------------------------------------------
+//
+// A two-column definition grid does not survive a 375px screen: the label column
+// squeezes the value into a ragged ribbon. Stack instead, and give every value a full
+// thumb-height row.
+
+@media all and ($mobile) {
+  .wiki-facts .wiki-facts-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .wiki-facts .wiki-fact > dt {
+    padding: 0.55rem 0.9rem 0;
+    border-top: 1px solid color-mix(in srgb, var(--lightgray) 60%, transparent);
+    font-size: 0.76rem;
+    letter-spacing: 0.02em;
+  }
+
+  .wiki-facts .wiki-fact > dd {
+    padding: 0.1rem 0.9rem 0.55rem;
+    border-top: 0;
+  }
+
+  .wiki-facts .wiki-fact-value {
+    min-height: 34px;
+    font-size: 1rem;
+  }
+}

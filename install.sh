@@ -1,0 +1,468 @@
+#!/bin/bash
+# wiki-starter installer — sets up an LLM-maintained wiki that lives on this Mac.
+#
+#   curl -fsSL https://raw.githubusercontent.com/arkceo/wiki-starter/main/install.sh | bash
+#
+# What it does (each step checks first, so running it again is safe and resumes):
+#   1. checks this is a Mac you can administer;
+#   2. installs Homebrew (asks for your Mac password once), then git, Node, Python and
+#      the OCR tools (ocrmypdf, Tesseract, Ghostscript);
+#   3. installs Claude Code and stores your Anthropic sign-in in the macOS Keychain;
+#   4. downloads the wiki engine into ~/Wiki/<name> and sets up its local history (git,
+#      on this Mac only);
+#   5. starts two background agents: the runner (processes what you drop in) and the
+#      viewer (the wiki site at http://127.0.0.1:8765, visible only to this Mac);
+#   6. puts Wiki Inbox, Wiki Intake and Open Wiki on your Desktop;
+#   7. processes a welcome note as a test and opens the wiki.
+#
+# Nothing is published. The only account involved is Anthropic's. Logs (no secrets):
+# ~/Library/Logs/wiki-starter/install.log
+#
+# Answers can be given as environment variables instead of prompts:
+#   WIKI_TITLE, WIKI_COMPANY, WIKI_AUTH (subscription|apikey|skip), WIKI_API_KEY,
+#   WIKI_OAUTH_TOKEN, WIKI_SKIP_SMOKE_TEST=1
+
+set -u
+
+ENGINE_REPO="${WIKI_ENGINE_REPO:-arkceo/wiki-starter}"
+ENGINE_URL="${WIKI_ENGINE_URL:-https://codeload.github.com/$ENGINE_REPO/tar.gz/refs/heads/main}"
+WIKI_ROOT="${WIKI_ROOT:-$HOME/Wiki}"
+PORT="${WIKI_PORT:-8765}"
+KEYCHAIN_SERVICE="wiki-starter"
+LOG_DIR="$HOME/Library/Logs/wiki-starter"
+LOG_FILE="$LOG_DIR/install.log"
+AGENT_DIR="$HOME/Library/LaunchAgents"
+AGENT_PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+mkdir -p "$LOG_DIR"
+
+# ------------------------------------------------------------------ output -----
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; log "ok: $*"; }
+info() { printf '    %s\n' "$*"; }
+warn() { printf '  \033[33m!\033[0m %s\n' "$*"; log "warn: $*"; }
+die()  { printf '\n  \033[31m✗ %s\033[0m\n    Details: %s\n    Run the same command again to retry; finished steps are skipped.\n' "$*" "$LOG_FILE"; log "FAILED: $*"; exit 1; }
+log()  { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"; }
+step() { printf '\n'; bold "$*"; log "== $*"; }
+
+have_tty() { { : < /dev/tty; } 2>/dev/null; }
+
+ask() { # VAR "question" "default"
+  local current answer
+  eval "current=\${$1:-}"
+  if [ -n "$current" ]; then return 0; fi
+  if have_tty; then
+    if [ -n "$3" ]; then printf '  %s [%s]: ' "$2" "$3" > /dev/tty; else printf '  %s: ' "$2" > /dev/tty; fi
+    IFS= read -r answer < /dev/tty || answer=""
+  else
+    answer=""
+  fi
+  [ -n "$answer" ] || answer="$3"
+  eval "$1=\$answer"
+}
+
+ask_secret() { # VAR "question"
+  local current answer
+  eval "current=\${$1:-}"
+  if [ -n "$current" ]; then return 0; fi
+  have_tty || { eval "$1=''"; return 0; }
+  printf '  %s: ' "$2" > /dev/tty
+  IFS= read -rs answer < /dev/tty || answer=""
+  printf '\n' > /dev/tty
+  eval "$1=\$answer"
+}
+
+slugify() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9]\{1,\}/-/g' -e 's/^-//' -e 's/-$//' | cut -c1-40; }
+
+xml_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+
+brew_bin() {
+  if command -v brew >/dev/null 2>&1; then command -v brew
+  elif [ -x /opt/homebrew/bin/brew ]; then echo /opt/homebrew/bin/brew
+  elif [ -x /usr/local/bin/brew ]; then echo /usr/local/bin/brew
+  fi
+}
+
+SUDO_KEEPALIVE_PID=""
+stop_sudo_keepalive() { [ -n "$SUDO_KEEPALIVE_PID" ] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null; SUDO_KEEPALIVE_PID=""; }
+trap stop_sudo_keepalive EXIT
+
+# --------------------------------------------------------------- 1 preflight ---
+preflight() {
+  step "1/7  Checking this Mac"
+  if [ "$(uname -s)" != "Darwin" ] && [ -z "${WIKI_ALLOW_NON_MAC:-}" ]; then
+    die "This installer is for macOS."
+  fi
+  if [ "$(id -u)" = "0" ]; then die "Run this as your normal user, not with sudo."; fi
+  local ver major
+  ver=$(sw_vers -productVersion 2>/dev/null || echo "0")
+  major=${ver%%.*}
+  if [ "${major:-0}" -lt 13 ] 2>/dev/null; then
+    die "macOS 13 (Ventura) or newer is needed; this Mac has $ver."
+  fi
+  ok "macOS $ver on $(uname -m)"
+  if ! curl -fsS -o /dev/null --max-time 15 https://github.com 2>/dev/null; then
+    die "No internet connection (could not reach github.com)."
+  fi
+  ok "online"
+}
+
+# ------------------------------------------------------------- 2 questions -----
+WIKI_DIR=""
+SLUG=""
+questions() {
+  step "2/7  Your wiki"
+  local existing
+  existing=$(ls -d "$WIKI_ROOT"/*/.wiki-engine 2>/dev/null | head -1)
+  if [ -n "$existing" ] && [ -z "${WIKI_TITLE:-}" ]; then
+    WIKI_DIR=$(dirname "$existing")
+    SLUG=$(basename "$WIKI_DIR")
+    ok "found the existing wiki at $WIKI_DIR (repairing and resuming)"
+    return 0
+  fi
+  ask WIKI_COMPANY "Company name" ""
+  local default_title="Wiki"
+  [ -n "$WIKI_COMPANY" ] && default_title="$WIKI_COMPANY Wiki"
+  ask WIKI_TITLE "Wiki title" "$default_title"
+  SLUG=$(slugify "$WIKI_TITLE")
+  [ -n "$SLUG" ] || SLUG="wiki"
+  WIKI_DIR="$WIKI_ROOT/$SLUG"
+  ok "the wiki will live in $WIKI_DIR"
+}
+
+# ------------------------------------------------------------------ 3 tools ----
+install_tools() {
+  step "3/7  Installing tools (a few minutes the first time)"
+  local brew
+  brew=$(brew_bin)
+  if [ -z "$brew" ]; then
+    if ! id -Gn | tr ' ' '\n' | grep -qx admin; then
+      die "Homebrew needs an administrator account. Log in as an admin user, or ask one to run this."
+    fi
+    info "Homebrew is the standard way to install developer tools on a Mac."
+    info "macOS will ask for your Mac password once."
+    sudo -v < /dev/tty || die "Could not get administrator permission."
+    ( while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit; done ) 2>/dev/null &
+    SUDO_KEEPALIVE_PID=$!
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" >> "$LOG_FILE" 2>&1 \
+      || die "Homebrew did not install."
+    stop_sudo_keepalive
+    brew=$(brew_bin)
+    [ -n "$brew" ] || die "Homebrew installed but could not be found."
+  fi
+  eval "$("$brew" shellenv)"
+  if ! grep -qs 'brew shellenv' "$HOME/.zprofile"; then
+    printf '\neval "$(%s shellenv)"\n' "$brew" >> "$HOME/.zprofile"
+  fi
+  ok "Homebrew"
+
+  local pkg missing=""
+  for pkg in git node python@3.12 ocrmypdf; do
+    "$brew" list --formula "$pkg" >/dev/null 2>&1 || missing="$missing $pkg"
+  done
+  if [ -n "$missing" ]; then
+    info "installing:$missing"
+    # shellcheck disable=SC2086
+    HOMEBREW_NO_AUTO_UPDATE=1 "$brew" install $missing >> "$LOG_FILE" 2>&1 || die "Could not install:$missing"
+  fi
+  ok "git, Node, Python 3.12, OCR tools"
+
+  if ! command -v claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/claude" ]; then
+    info "installing Claude Code"
+    curl -fsSL https://claude.ai/install.sh | bash >> "$LOG_FILE" 2>&1 || die "Claude Code did not install."
+  fi
+  export PATH="$HOME/.local/bin:$PATH"
+  command -v claude >/dev/null 2>&1 || die "Claude Code installed but could not be found."
+  ok "Claude Code"
+}
+
+# ----------------------------------------------------------------- 4 engine ----
+python_bin() {
+  local p
+  for p in "$(brew_bin 2>/dev/null | xargs dirname 2>/dev/null)/python3.12" /opt/homebrew/bin/python3.12 /usr/local/bin/python3.12 python3.12 python3; do
+    if command -v "$p" >/dev/null 2>&1 || [ -x "$p" ]; then echo "$p"; return 0; fi
+  done
+  return 1
+}
+
+install_engine() {
+  step "4/7  Setting up the wiki"
+  if [ -f "$WIKI_DIR/.wiki-engine/VERSION" ]; then
+    ok "engine already in place ($(cat "$WIKI_DIR/.wiki-engine/VERSION")); use Update Wiki Engine to update it"
+  else
+    if [ -e "$WIKI_DIR" ] && [ -n "$(ls -A "$WIKI_DIR" 2>/dev/null)" ]; then
+      die "$WIKI_DIR already exists and is not a wiki. Choose another title or move that folder."
+    fi
+    local tmp
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/wiki-starter.XXXXXX")
+    if [ -n "${WIKI_ENGINE_DIR:-}" ]; then
+      cp -R "$WIKI_ENGINE_DIR"/. "$tmp"/ || die "Could not copy the engine from $WIKI_ENGINE_DIR."
+    else
+      curl -fsSL "$ENGINE_URL" | tar -xzf - -C "$tmp" --strip-components 1 \
+        || die "Could not download the wiki engine."
+    fi
+    [ -f "$tmp/.wiki-engine/VERSION" ] || die "The download does not look like the wiki engine."
+    mkdir -p "$WIKI_DIR"
+    cp -R "$tmp"/. "$WIKI_DIR"/ || die "Could not copy the engine into $WIKI_DIR."
+    rm -rf "$tmp"
+    ok "engine $(cat "$WIKI_DIR/.wiki-engine/VERSION") copied into $WIKI_DIR"
+  fi
+  cd "$WIKI_DIR" || die "Cannot open $WIKI_DIR."
+  chmod +x scripts/*.sh ./*.command install.sh 2>/dev/null
+
+  local py
+  py=$(python_bin) || die "Python 3.12 not found."
+  mkdir -p .wiki-engine/state
+  if [ ! -f .wiki-engine/state/config.done ]; then
+    WIKI_TITLE_V="${WIKI_TITLE:-Wiki}" WIKI_COMPANY_V="${WIKI_COMPANY:-}" WIKI_PORT_V="$PORT" "$py" - <<'PYEOF' || die "Could not write wiki.config.json."
+import json, os, re
+cfg = {}
+try:
+    cfg = json.load(open("wiki.config.json"))
+except Exception:
+    pass
+cfg["title"] = os.environ["WIKI_TITLE_V"]
+cfg["company"] = os.environ["WIKI_COMPANY_V"]
+cfg["port"] = int(os.environ["WIKI_PORT_V"])
+cfg.setdefault("maxSpendPerRunUsd", 5)
+json.dump(cfg, open("wiki.config.json", "w"), indent=2)
+open("wiki.config.json", "a").write("\n")
+company = os.environ["WIKI_COMPANY_V"]
+if company:
+    p = "HOUSE-RULES.md"
+    s = open(p).read()
+    s = re.sub(r"^- Company name:\s*$", "- Company name: " + company, s, count=1, flags=re.M)
+    open(p, "w").write(s)
+PYEOF
+    : > .wiki-engine/state/config.done
+  fi
+  ok "settings saved in wiki.config.json"
+
+  if [ ! -x .venv/bin/python ] || ! .venv/bin/python -c "import markitdown, pypdf" 2>/dev/null; then
+    info "installing the document converter (MarkItDown)"
+    rm -rf .venv
+    "$py" -m venv .venv >> "$LOG_FILE" 2>&1 \
+      && .venv/bin/python -m pip install --quiet --upgrade pip >> "$LOG_FILE" 2>&1 \
+      && .venv/bin/python -m pip install --quiet -r scripts/requirements.txt >> "$LOG_FILE" 2>&1 \
+      || { rm -rf .venv; die "Could not install the document converter."; }
+  fi
+  ok "document converter"
+
+  if [ ! -d node_modules ] || [ package-lock.json -nt node_modules ]; then
+    info "installing the site builder"
+    npm ci --no-audit --no-fund >> "$LOG_FILE" 2>&1 || die "Could not install the site builder."
+    touch node_modules
+  fi
+  ok "site builder"
+
+  if [ ! -d .git ]; then
+    git init -q -b main >> "$LOG_FILE" 2>&1 || git init -q >> "$LOG_FILE" 2>&1 || die "git init failed."
+    git add -A -- . >> "$LOG_FILE" 2>&1
+    git -c user.name="Wiki installer" -c user.email="installer@localhost" \
+      commit -q -m "install: wiki-starter $(cat .wiki-engine/VERSION)" >> "$LOG_FILE" 2>&1 \
+      || die "First commit failed."
+  fi
+  ok "local history (git, never pushed anywhere)"
+
+  # Build the site now, before the agents start, so the runner's at-login run finds
+  # nothing to do instead of racing this build for the lock.
+  if [ ! -f public/index.html ]; then
+    info "building the site"
+    bash scripts/wiki_runner.sh --rebuild >> "$LOG_FILE" 2>&1 || warn "the first site build failed; see $LOG_DIR/runner.log"
+  fi
+  [ -f public/index.html ] && ok "site built"
+}
+
+# ------------------------------------------------------------ 5 anthropic ------
+keychain_has() { security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$1" >/dev/null 2>&1; }
+keychain_put() { security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a "$1" -l "Wiki ($1)" -w "$2" >/dev/null 2>&1; }
+keychain_del() { security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "$1" >/dev/null 2>&1; }
+
+check_api_key() { # key -> http status of a free models listing
+  printf 'x-api-key: %s\nanthropic-version: 2023-06-01\n' "$1" \
+    | curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -H @- https://api.anthropic.com/v1/models 2>/dev/null
+}
+
+check_oauth_token() { # token -> 0 if claude answers with it
+  local out
+  out=$(cd "${TMPDIR:-/tmp}" && env -u ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN="$1" \
+    claude -p "Reply with exactly: OK" --max-turns 1 2>/dev/null < /dev/null)
+  printf '%s' "$out" | grep -q "OK"
+}
+
+anthropic_signin() {
+  step "5/7  Anthropic sign-in"
+  if keychain_has claude-oauth-token || keychain_has anthropic-api-key; then
+    local replace="${WIKI_REPLACE_AUTH:-}"
+    [ -n "${WIKI_AUTH:-}" ] && replace="y"
+    ask replace "A sign-in is already stored. Replace it? (y/N)" "n"
+    case "$replace" in y|Y|yes|YES) ;; *) ok "using the stored sign-in"; return 0 ;; esac
+  fi
+  info "Claude needs an Anthropic account to read your documents. Choose one:"
+  info "  1) Claude subscription (Pro or Max): sign in through the browser"
+  info "  2) Anthropic API key (pay as you go, from console.anthropic.com)"
+  local choice="${WIKI_AUTH:-}"
+  case "$choice" in subscription) choice=1 ;; apikey) choice=2 ;; skip) choice=s ;; esac
+  ask choice "Choose 1 or 2" "1"
+  case "$choice" in
+    1)
+      local token="${WIKI_OAUTH_TOKEN:-}"
+      if [ -z "$token" ]; then
+        info "A browser window opens. Sign in, approve, then come back here."
+        info "Claude Code prints a long token starting with sk-ant-oat. Copy it."
+        have_tty && claude setup-token < /dev/tty > /dev/tty 2>&1
+        ask_secret token "Paste the token (it stays hidden)"
+      fi
+      [ -n "$token" ] || die "No token entered."
+      check_oauth_token "$token" || die "That token did not work. Run the installer again and paste the whole token."
+      keychain_del anthropic-api-key
+      keychain_put claude-oauth-token "$token" || die "Could not save the token in the Keychain."
+      ok "subscription sign-in stored in the Keychain"
+      ;;
+    2)
+      local key="${WIKI_API_KEY:-}"
+      if [ -z "$key" ]; then
+        info "Create a key at https://console.anthropic.com/settings/keys"
+        info "and set a monthly spend limit there."
+        have_tty && open "https://console.anthropic.com/settings/keys" 2>/dev/null
+        ask_secret key "Paste the API key (it stays hidden)"
+      fi
+      [ -n "$key" ] || die "No key entered."
+      [ "$(check_api_key "$key")" = "200" ] || die "Anthropic did not accept that key."
+      keychain_del claude-oauth-token
+      keychain_put anthropic-api-key "$key" || die "Could not save the key in the Keychain."
+      ok "API key stored in the Keychain"
+      ;;
+    s) warn "skipped: the wiki will not process anything until you run the installer again" ;;
+    *) die "Please choose 1 or 2." ;;
+  esac
+}
+
+# --------------------------------------------------------------- 6 agents ------
+write_plist() { # path label program-args-xml extra-xml
+  cat > "$1" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$2</string>
+  <key>ProgramArguments</key>
+  <array>
+$3
+  </array>
+  <key>WorkingDirectory</key><string>$(xml_escape "$WIKI_DIR")</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>$(xml_escape "$AGENT_PATH")</string>
+    <key>LANG</key><string>en_US.UTF-8</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+$4
+  <key>StandardOutPath</key><string>$(xml_escape "$LOG_DIR/$2.out.log")</string>
+  <key>StandardErrorPath</key><string>$(xml_escape "$LOG_DIR/$2.err.log")</string>
+</dict>
+</plist>
+EOF
+}
+
+load_agent() { # plist label
+  launchctl bootout "gui/$(id -u)/$2" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$(id -u)" "$1" >> "$LOG_FILE" 2>&1 || die "Could not start the background agent $2."
+}
+
+install_agents() {
+  step "6/7  Starting the background agents"
+  mkdir -p "$AGENT_DIR"
+  local runner="local.wiki-starter.$SLUG.runner" viewer="local.wiki-starter.$SLUG.viewer"
+  local d; d=$(xml_escape "$WIKI_DIR")
+
+  write_plist "$AGENT_DIR/$runner.plist" "$runner" \
+"    <string>/bin/bash</string>
+    <string>$d/scripts/wiki_runner.sh</string>" \
+"  <key>WatchPaths</key>
+  <array>
+    <string>$d/raw/inbox</string>
+    <string>$d/raw/_intake</string>
+  </array>
+  <key>StartInterval</key><integer>900</integer>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ProcessType</key><string>Background</string>"
+  load_agent "$AGENT_DIR/$runner.plist" "$runner"
+  ok "runner: processes Wiki Inbox and Wiki Intake"
+
+  write_plist "$AGENT_DIR/$viewer.plist" "$viewer" \
+"    <string>$d/.venv/bin/python</string>
+    <string>$d/scripts/wiki_server.py</string>" \
+"  <key>KeepAlive</key><true/>"
+  load_agent "$AGENT_DIR/$viewer.plist" "$viewer"
+  ok "viewer: http://127.0.0.1:$PORT (this Mac only)"
+
+  # Desktop shortcuts. Plain symlinks: no Finder automation prompt.
+  local desk="$HOME/Desktop" inbox="Wiki Inbox" intake="Wiki Intake" opener="Open Wiki.webloc"
+  mkdir -p "$desk"
+  if [ -e "$desk/$inbox" ] && [ "$(readlink "$desk/$inbox")" != "$WIKI_DIR/raw/inbox" ]; then
+    inbox="$WIKI_TITLE_SHOWN Inbox"; intake="$WIKI_TITLE_SHOWN Intake"; opener="Open $WIKI_TITLE_SHOWN.webloc"
+  fi
+  ln -sfn "$WIKI_DIR/raw/inbox" "$desk/$inbox"
+  ln -sfn "$WIKI_DIR/raw/_intake" "$desk/$intake"
+  cat > "$desk/$opener" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>URL</key><string>http://127.0.0.1:$PORT/</string></dict></plist>
+EOF
+  ok "Desktop: $inbox, $intake, ${opener%.webloc}"
+}
+
+# ------------------------------------------------------------ 7 first run ------
+first_run() {
+  step "7/7  First test"
+  if [ -n "${WIKI_SKIP_SMOKE_TEST:-}" ] || [ -n "$(ls archive/inbox/*.md 2>/dev/null)" ]; then
+    ok "test skipped"
+  elif ! keychain_has claude-oauth-token && ! keychain_has anthropic-api-key; then
+    warn "test skipped: no Anthropic sign-in stored"
+  else
+    local today packet waited=0
+    today=$(date +%F)
+    packet="raw/inbox/update-$today-general.md"
+    sed -e "s/WELCOME_DATE/$today/g" -e "s/WELCOME_PORT/$PORT/g" \
+        -e "s/WELCOME_COMPANY/$(printf '%s' "${WIKI_COMPANY:-this business}" | sed 's/[&/\]/\\&/g')/g" \
+        engine/welcome-packet.md > "$packet"
+    info "dropped a welcome note into Wiki Inbox; waiting for the runner (up to 5 minutes)"
+    while [ -f "$packet" ] && [ "$waited" -lt 300 ]; do sleep 10; waited=$((waited + 10)); printf '.'; done
+    printf '\n'
+    if [ ! -f "$packet" ]; then
+      # Give the rebuild a moment to finish after the packet was archived.
+      sleep 20
+      ok "the runner processed the welcome note"
+    else
+      warn "the runner has not finished yet. It keeps going in the background; see $LOG_DIR/runner.log"
+    fi
+  fi
+  open "http://127.0.0.1:$PORT/" 2>/dev/null || true
+}
+
+# ------------------------------------------------------------------- main ------
+printf '\n'
+bold "Wiki installer"
+info "Everything stays on this Mac. Log: $LOG_FILE"
+log "installer started (engine $ENGINE_REPO)"
+
+preflight
+questions
+WIKI_TITLE_SHOWN="${WIKI_TITLE:-$SLUG}"
+install_tools
+install_engine
+anthropic_signin
+install_agents
+first_run
+
+printf '\n'
+bold "Done."
+info "Wiki folder:   $WIKI_DIR"
+info "Read it:       http://127.0.0.1:$PORT  (Open Wiki on the Desktop)"
+info "Add documents: drop them into Wiki Intake on the Desktop"
+info "Add notes:     drop Update Packets into Wiki Inbox on the Desktop"
+info "Your rules:    edit HOUSE-RULES.md in the wiki folder"
+info "Ask questions: open the wiki folder in Claude (desktop app or 'claude' in Terminal)"
+info "Turn on Time Machine: your documents are not kept anywhere else."
+printf '\n'

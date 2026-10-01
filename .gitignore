@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+Icon?
+
+# Source documents stay on disk, out of git (back them up with Time Machine).
+# Only the two drop folders' placeholders are tracked.
+raw/*
+!raw/inbox/
+!raw/_intake/
+raw/inbox/*
+!raw/inbox/.gitkeep
+raw/_intake/*
+!raw/_intake/README.md
+
+# Derived and machine-local
+/cache
+/public
+/node_modules
+.quartz-cache
+/.venv
+__pycache__/
+*.pyc
+prof
+tsconfig.tsbuildinfo
+.wiki-engine/backup/
+.wiki-engine/state/

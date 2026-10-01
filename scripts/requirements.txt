@@ -1,0 +1,4 @@
+# Document converter for scripts/to_markdown.py (installed into .venv by install.sh).
+# OCR for scanned PDFs comes from Homebrew's ocrmypdf (Tesseract + Ghostscript).
+markitdown[docx,pdf,pptx,xls,xlsx,outlook]
+pypdf
