@@ -2,6 +2,13 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Clearer processing
+- A "Wiki is working" notice when a run starts, not only when it ends.
+- Files dropped while a run is busy are processed straight after it, instead of waiting
+  up to 15 minutes.
+- The same file dropped into both Wiki Inbox and Wiki Intake is processed once.
+- Process Now explains when a run is already in progress and how to watch it.
+
 ## Installer fix
 - The one-line installer could stop silently after step 3 ("Claude Code") when Homebrew
   had tools to install. Running the same line again now finishes the remaining steps.

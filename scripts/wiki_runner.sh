@@ -101,6 +101,7 @@ notify_error() { # message; rate-limited so a broken setup does not alert every 
 acquire_lock() {
   if mkdir "$LOCK_DIR" 2>/dev/null; then
     echo $$ > "$LOCK_DIR/pid"
+    date '+%H:%M' > "$LOCK_DIR/started"
     return 0
   fi
   local pid
@@ -112,6 +113,7 @@ acquire_lock() {
   rm -rf "$LOCK_DIR"
   mkdir "$LOCK_DIR" 2>/dev/null || return 1
   echo $$ > "$LOCK_DIR/pid"
+  date '+%H:%M' > "$LOCK_DIR/started"
 }
 release_lock() { rm -rf "$LOCK_DIR"; }
 
@@ -173,25 +175,37 @@ looks_like_packet() { # file
   head -c 400 "$1" 2>/dev/null | grep -q '^## \[[0-9]\{4\}-[0-9][0-9]-[0-9][0-9]\] *update *|'
 }
 
+route_to() { # file dest-dir
+  local f="$1" d="$2" b
+  b=$(basename "$f")
+  mkdir -p "$d"
+  if [ -e "$d/$b" ]; then
+    # The same file dropped into both folders is processed once, not twice.
+    if cmp -s "$f" "$d/$b"; then
+      rm -f "$f" && log "dropped $f: an identical copy is already in $d"
+      return 0
+    fi
+    b="$(date +%Y%m%d%H%M%S)-$b"
+  fi
+  mv "$f" "$d/$b" && log "routed $f -> $d/$b"
+}
+
 route_misfiled() {
-  local f b
+  local f
   # A document dropped into the Inbox belongs in Intake.
   list_pending raw/inbox | while IFS= read -r f; do
     case "$f" in *.md|*.markdown) continue ;; esac
-    b=$(basename "$f")
-    mkdir -p raw/_intake
-    if [ -e "raw/_intake/$b" ]; then b="$(date +%Y%m%d%H%M%S)-$b"; fi
-    mv "$f" "raw/_intake/$b" && log "routed $f -> raw/_intake/$b"
+    route_to "$f" raw/_intake
   done
   # A packet dropped into Intake belongs in the Inbox.
   list_pending raw/_intake | while IFS= read -r f; do
     case "$f" in *.md) ;; *) continue ;; esac
     looks_like_packet "$f" || continue
-    b=$(basename "$f")
-    if [ -e "raw/inbox/$b" ]; then b="$(date +%Y%m%d%H%M%S)-$b"; fi
-    mv "$f" "raw/inbox/$b" && log "routed $f -> raw/inbox/$b"
+    route_to "$f" raw/inbox
   done
 }
+
+list_packets() { list_pending raw/inbox | grep -E '\.(md|markdown)$' || true; }
 
 snapshot_filed_sources() {
   find raw -type f \
@@ -329,6 +343,11 @@ done
 
 if ! acquire_lock; then
   log "another run is in progress; exiting"
+  if [ -t 1 ]; then
+    printf 'The wiki is already processing (since %s). New drops are picked up when it finishes.\n' \
+      "$(cat "$LOCK_DIR/started" 2>/dev/null || echo 'a moment ago')"
+    printf 'Watch it live:  tail -f %s\n' "$LOG_FILE"
+  fi
   exit 0
 fi
 trap release_lock EXIT
@@ -356,6 +375,7 @@ PACKETS_BEFORE=$(list_pending raw/inbox)
 N_DOCS=$(count_lines "$DOCS_BEFORE")
 N_PACKETS=$(count_lines "$PACKETS_BEFORE")
 log "$RUN_ID: $N_DOCS document(s), $N_PACKETS packet(s) waiting"
+notify "Wiki is working" "Reading $N_DOCS document(s) and $N_PACKETS packet(s). This can take a few minutes; another notice follows when it is done."
 
 SNAP_BEFORE="$STATE_DIR/snap.before"; SNAP_AFTER="$STATE_DIR/snap.after"
 snapshot_filed_sources > "$SNAP_BEFORE"
@@ -370,13 +390,20 @@ fi
 
 round=0
 while [ "$CLAUDE_OK" = 1 ] && [ "$round" -lt "$MAX_INGEST_ROUNDS" ]; do
-  left=$(count_lines "$(list_pending raw/inbox)")
-  [ "$left" -gt 0 ] || break
+  ROUND_PACKETS=$(list_packets)
+  [ -n "$ROUND_PACKETS" ] || break
   round=$((round + 1))
   run_claude "ingest#$round" engine/prompts/ingest.md 60 || { CLAUDE_OK=0; break; }
-  now_left=$(count_lines "$(list_pending raw/inbox)")
-  if [ "$now_left" -ge "$left" ]; then
-    log "ingest#$round made no progress ($now_left packet(s) left); stopping this run"
+  # Progress means packets that were waiting at the start of this round are gone;
+  # files dropped meanwhile do not count against it.
+  remaining=0
+  while IFS= read -r p; do
+    [ -f "$p" ] && remaining=$((remaining + 1))
+  done <<ROUND
+$ROUND_PACKETS
+ROUND
+  if [ "$remaining" -ge "$(count_lines "$ROUND_PACKETS")" ]; then
+    log "ingest#$round made no progress ($remaining packet(s) left); stopping this run"
     break
   fi
 done
@@ -413,4 +440,17 @@ else
   notify_error "The wiki was updated but the site could not be rebuilt. See ~/Library/Logs/wiki-starter/runner.log."
 fi
 log "$RUN_ID: done ($DONE_DOCS document(s), $DONE_PACKETS packet(s))"
+
+# Files dropped while this run was busy would otherwise wait for the 15-minute timer:
+# the folder watcher fired, found this run holding the lock, and gave up. Start another
+# run now (bounded, and never when Claude itself could not run).
+ARRIVED=$( { list_pending raw/_intake; list_pending raw/inbox; } | LC_ALL=C sort \
+  | LC_ALL=C comm -23 - <(printf '%s\n%s\n' "$DOCS_BEFORE" "$PACKETS_BEFORE" | sed '/^$/d' | LC_ALL=C sort) )
+if [ "$CLAUDE_OK" = 1 ] && [ -n "$ARRIVED" ] && [ "${WIKI_RERUN_DEPTH:-0}" -lt 3 ]; then
+  log "$(count_lines "$ARRIVED") file(s) arrived during this run; starting another run"
+  release_lock
+  trap - EXIT
+  export WIKI_RERUN_DEPTH=$(( ${WIKI_RERUN_DEPTH:-0} + 1 ))
+  exec /bin/bash "$WIKI_DIR/scripts/wiki_runner.sh"
+fi
 exit 0

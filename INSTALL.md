@@ -90,7 +90,7 @@ replaces engine files only: scripts, site code, prompts, `CLAUDE.md`. It never t
 
 | Symptom | Fix |
 |---|---|
-| Nothing happens after dropping a file | Wait a minute (the runner waits for copies to finish). Then double-click **Process Now** and read what it prints. |
+| Nothing seems to happen after dropping a file | It is probably working: a batch of PDFs takes 5–15 minutes. Watch it with `tail -f ~/Library/Logs/wiki-starter/runner.log` (Ctrl+C stops watching, not the work). **Process Now** says so if a run is already busy. If no "Wiki is working" notice appeared, allow notifications for *Script Editor* in System Settings → Notifications. |
 | "Wiki needs attention: Claude could not run" | The sign-in expired or was revoked. Run the install line again and choose to replace the sign-in. |
 | A file was moved to `raw/_needs-review/` | It failed twice. Check it opens, then drop it into Wiki Intake again. The Review queue says why. |
 | Scanned PDF summarised badly | OCR quality depends on the scan. The original is always kept and linked from the page. |
