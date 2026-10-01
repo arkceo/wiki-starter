@@ -2,6 +2,12 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## README: updating during a large upload
+- The README says when to update (when the Upload page shows Idle, since the update waits
+  for a run to finish), and that "Waiting to convert" during a large upload means a later
+  batch, not a problem. It also states plainly that with This Mac only, nothing leaves
+  the Mac and Claude is never used.
+
 ## Large uploads in batches
 - Documents are now read in batches: 8 at a time with Claude, 20 with the model on this
   Mac. Each batch is converted and read before the next, so a large upload is read in

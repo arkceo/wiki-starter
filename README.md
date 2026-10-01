@@ -14,7 +14,8 @@ files the originals. You read the result in your browser. Nothing is published.
 - Choose who reads your documents:
   - **Claude** (recommended): you need a Claude Pro or Max subscription, or an Anthropic
     API key from console.anthropic.com with a monthly spend limit set.
-  - **This Mac only**: no account is needed, but the Mac must have Apple silicon and
+  - **This Mac only**: a model on the Mac reads everything. Nothing leaves the Mac, no
+    account is needed and Claude is never used, but the Mac must have Apple silicon and
     **16 GB of memory**.
 - About 3 GB of free disk space (about 9 GB with the model on this Mac), and an internet
   connection.
@@ -81,6 +82,9 @@ skill, say "wrap up" at the end of a conversation, and upload the file it gives 
 - **Update:** double-click **Update Wiki Engine** in the wiki folder. Your pages,
   documents, house rules and settings are never touched. To undo an update, run
   `git revert HEAD` in the wiki folder.
+- **Update between runs:** the update does not start while the wiki is reading files.
+  Wait until the Upload page shows **Idle** (or only "file(s) waiting to start"); a
+  large upload can take hours.
 - **Switch between Claude and This Mac only:** paste the install line again and choose
   the other option. Your wiki stays as it is.
 
@@ -89,6 +93,8 @@ skill, say "wrap up" at the end of a conversation, and upload the file it gives 
 | You see | Do this |
 |---|---|
 | Files stay "Queued" | Open System Settings → General → Login Items & Extensions → *Allow in the Background*, turn **bash** on, then press **Process now**. |
+| Files say "Waiting to convert" for a long time | Normal for a large upload: they are in a later batch. The live line shows which batch is being read. |
+| Update says "The wiki is processing files right now" | Wait until the Upload page shows **Idle**, then update again. If it already showed Idle, try again in 15 minutes. |
 | The Upload page says "Forbidden" | Reload the page. The wiki restarted, which an update does. |
 | "Claude could not run" | Paste the install line again and replace the sign-in. |
 | "The local model could not run" | Paste the install line again. It checks and repairs the model. |
