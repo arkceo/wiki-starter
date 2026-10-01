@@ -2,6 +2,9 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Install guide link
+- The README links the step-by-step install guide, from install to uninstall.
+
 ## Clearer processing
 - A "Wiki is working" notice when a run starts, not only when it ends.
 - Files dropped while a run is busy are processed straight after it, instead of waiting

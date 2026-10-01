@@ -15,6 +15,9 @@ and paste:
 curl -fsSL https://raw.githubusercontent.com/arkceo/wiki-starter/main/install.sh | bash
 ```
 
+Step-by-step guide, from install to uninstall:
+[Wiki install guide](https://claude.ai/artifact/EVqBQYt9mZP5v15Bk7T4JE)
+
 You will be asked for:
 
 1. your Mac password, once (to install Homebrew and the document tools);
