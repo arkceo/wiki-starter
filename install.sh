@@ -442,27 +442,38 @@ first_run() {
 }
 
 # ------------------------------------------------------------------- main ------
-printf '\n'
-bold "Wiki installer"
-info "Everything stays on this Mac. Log: $LOG_FILE"
-log "installer started (engine $ENGINE_REPO)"
+# Everything runs inside main(), called on the last line, so bash has read the whole
+# script before any step starts. With `curl ... | bash`, bash reads this file from the
+# same pipe every command it starts inherits as stdin; a command that reads stdin
+# (Homebrew does while installing) would otherwise swallow the rest of the script and
+# the installer would stop silently after step 3. Prompts read /dev/tty directly, so
+# stdin is pointed at /dev/null for good measure.
+main() {
+  exec < /dev/null
+  printf '\n'
+  bold "Wiki installer"
+  info "Everything stays on this Mac. Log: $LOG_FILE"
+  log "installer started (engine $ENGINE_REPO)"
 
-preflight
-questions
-WIKI_TITLE_SHOWN="${WIKI_TITLE:-$SLUG}"
-install_tools
-install_engine
-anthropic_signin
-install_agents
-first_run
+  preflight
+  questions
+  WIKI_TITLE_SHOWN="${WIKI_TITLE:-$SLUG}"
+  install_tools
+  install_engine
+  anthropic_signin
+  install_agents
+  first_run
 
-printf '\n'
-bold "Done."
-info "Wiki folder:   $WIKI_DIR"
-info "Read it:       http://127.0.0.1:$PORT  (Open Wiki on the Desktop)"
-info "Add documents: drop them into Wiki Intake on the Desktop"
-info "Add notes:     drop Update Packets into Wiki Inbox on the Desktop"
-info "Your rules:    edit HOUSE-RULES.md in the wiki folder"
-info "Ask questions: open the wiki folder in Claude (desktop app or 'claude' in Terminal)"
-info "Turn on Time Machine: your documents are not kept anywhere else."
-printf '\n'
+  printf '\n'
+  bold "Done."
+  info "Wiki folder:   $WIKI_DIR"
+  info "Read it:       http://127.0.0.1:$PORT  (Open Wiki on the Desktop)"
+  info "Add documents: drop them into Wiki Intake on the Desktop"
+  info "Add notes:     drop Update Packets into Wiki Inbox on the Desktop"
+  info "Your rules:    edit HOUSE-RULES.md in the wiki folder"
+  info "Ask questions: open the wiki folder in Claude (desktop app or 'claude' in Terminal)"
+  info "Turn on Time Machine: your documents are not kept anywhere else."
+  printf '\n'
+}
+
+main "$@"
