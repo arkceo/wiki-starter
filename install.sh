@@ -59,6 +59,17 @@ step() { printf '\n'; bold "$*"; log "== $*"; }
 
 have_tty() { { : < /dev/tty; } 2>/dev/null; }
 
+# The terminal device itself (/dev/ttys003), for a program that needs the terminal as
+# its input. macOS's kqueue rejects /dev/tty, and Claude Code's runtime reads its input
+# through kqueue: given /dev/tty, `claude setup-token` crashed with "EINVAL: invalid
+# argument, kqueue". Falls back to /dev/tty when the device cannot be found.
+terminal_device() {
+  local t
+  t=$(ps -o tty= -p $$ 2>/dev/null | tr -d ' ')
+  case "$t" in ""|"?"*) t="" ;; /dev/*) ;; *) t="/dev/$t" ;; esac
+  if [ -n "$t" ] && [ -c "$t" ] && [ -r "$t" ] && [ -w "$t" ]; then printf '%s' "$t"; else printf '/dev/tty'; fi
+}
+
 ask() { # VAR "question" "default"
   local current answer
   eval "current=\${$1:-}"
@@ -405,7 +416,15 @@ anthropic_signin() {
       if [ -z "$token" ]; then
         info "A browser window opens. Sign in, approve, then come back here."
         info "Claude Code prints a long token starting with sk-ant-oat. Copy it."
-        have_tty && claude setup-token < /dev/tty > /dev/tty 2>&1
+        if have_tty; then
+          local term; term=$(terminal_device)
+          if ! claude setup-token < "$term" > "$term" 2>&1; then
+            log "claude setup-token exited with an error (terminal $term)"
+            warn "The sign-in did not finish here. Open a new Terminal window (Cmd+N),"
+            info "  run: $(command -v claude) setup-token"
+            info "  then copy the token it prints and paste it below."
+          fi
+        fi
         ask_secret token "Paste the token (it stays hidden)"
       fi
       [ -n "$token" ] || die "No token entered."

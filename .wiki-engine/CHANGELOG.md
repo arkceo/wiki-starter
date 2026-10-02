@@ -2,6 +2,14 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Subscription sign-in no longer crashes during install
+- Choosing the Claude subscription sign-in could crash with "EINVAL: invalid argument,
+  kqueue". The installer gave Claude Code the terminal through `/dev/tty`, which macOS
+  cannot watch the way Claude Code reads its input. It now gives it the terminal device
+  itself.
+- If the sign-in still does not finish, the installer says how to get the token from a
+  new Terminal window and paste it in.
+
 ## Uninstall steps that paste cleanly
 - The uninstall commands in the README and `INSTALL.md` contained comment lines. Terminal
   on a Mac (zsh) does not accept those when they are pasted: it showed errors, and one
