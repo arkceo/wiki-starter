@@ -16,7 +16,9 @@ files the originals. You read the result in your browser. Nothing is published.
     API key from console.anthropic.com with a monthly spend limit set.
   - **This Mac only**: a model on the Mac reads everything. Nothing leaves the Mac, no
     account is needed and Claude is never used, but the Mac must have Apple silicon and
-    **16 GB of memory**.
+    **16 GB of memory**. It builds the same kinds of pages as Claude and checks every
+    figure against its document, more slowly (a few minutes a document) and with plainer
+    writing. `INSTALL.md` has the measured comparison.
 - About 3 GB of free disk space (about 9 GB with the model on this Mac), and an internet
   connection.
 
@@ -69,8 +71,13 @@ If macOS shows **Background Items Added**, leave it allowed.
 - **Process immediately:** press **Process now** on the Upload page.
 - **Ask questions** (Claude only): open the wiki folder in the Claude desktop app, or run
   `claude` in Terminal inside that folder.
-- **Review queue:** the *Review queue* page lists anything the wiki was unsure about. The
-  model on this Mac only catches obvious contradictions.
+- **Review queue:** the *Review queue* page lists anything the wiki was unsure about. With
+  the model on this Mac, a figure a later document changes (payment terms, a price, a fee,
+  a notice period, an address) is caught by code and listed with both values and their
+  documents.
+- **Pages you edit:** with the model on this Mac, the top of a page (Overview, Current
+  facts, Related, Documents) is kept up to date by the wiki. Edit it and the wiki leaves
+  it as you wrote it; everything below it is never changed.
 - **Your rules:** edit `HOUSE-RULES.md` in the wiki folder.
 
 **Update Packets** are short notes Claude writes at the end of a working conversation. To

@@ -148,11 +148,13 @@ choose_engine() {
     && current=$(sed -n 's/.*"engine": *"\([a-z]*\)".*/\1/p' "$WIKI_DIR/wiki.config.json" | head -1)
   case "$choice" in claude) choice=1 ;; local) choice=2 ;; esac
   info "Who should read your documents?"
-  info "  1) Claude (recommended): the richest wiki, with pages written and cross-linked"
-  info "     like a careful assistant would. Needs an Anthropic sign-in; the text Claude"
-  info "     reads is sent to Anthropic."
+  info "  1) Claude (recommended): pages written and cross-linked like a careful assistant"
+  info "     would, in the most natural words, and you can ask it about your wiki. Needs an"
+  info "     Anthropic sign-in; the text Claude reads is sent to Anthropic."
   info "  2) This Mac only: a model runs on this Mac. Nothing leaves it and no account is"
-  info "     needed. The wiki is plainer, and a one-off download of about $LOCAL_MODEL_GB GB."
+  info "     needed. It builds the same kinds of pages and links, and checks every figure"
+  info "     against its document, but takes a few minutes a document and writes plainer"
+  info "     overviews. A one-off download of about $LOCAL_MODEL_GB GB."
   ask choice "Choose 1 or 2" "$([ "$current" = local ] && echo 2 || echo 1)"
   case "$choice" in
     1) ENGINE_CHOICE=claude ;;

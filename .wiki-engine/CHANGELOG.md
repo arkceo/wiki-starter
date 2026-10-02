@@ -2,6 +2,25 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## A richer wiki from the model on this Mac
+- The model on this Mac now builds the same kinds of pages as Claude: a summary of each
+  document; a page for each company, person and product it names, with its current facts,
+  how it relates to the others and the documents it appears in; topic pages (tax,
+  contracts, banking, month-end close, ...); decision pages; and an "At a glance" block on
+  the overview page.
+- Every figure, date and number is checked against its document before it is written.
+  Anything the document does not contain is left out. Links are checked too: one company
+  "owns" another only where a document speaks of ownership, who supplies whom follows what
+  most documents say, and in a spreadsheet two names are linked only by a row naming both.
+- A figure a later document changes (payment terms, a price, a fee, a notice period, an
+  address) is caught and put in the Review queue with both values and their documents.
+  The page shows the new value with the old one beside it.
+- The top of a page is kept up to date by the wiki. If you edit it, the wiki leaves it as
+  you wrote it.
+- Reading takes longer: a few minutes a document, so a large upload runs overnight. The
+  measured comparison with Claude is in `INSTALL.md`.
+- The model uses less memory over a long run.
+
 ## README: local network permission
 - The README says how to switch the "Python" local network permission off again if it
   was allowed earlier (System Settings → Privacy & Security → Local Network).

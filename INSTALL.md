@@ -106,10 +106,36 @@ If anything fails, run the same line again. Finished steps are skipped.
 |---|---|---|
 | Account | Anthropic (subscription or API key) | none |
 | What leaves the Mac | the text being read | nothing |
-| Pages | written and cross-linked with judgement; updates existing pages in place | a summary page per document, pages for the companies and people it names, dated entries on existing pages; existing text is never rewritten |
-| Contradictions | noticed and put in the Review queue | only plain ones; in testing it missed a contract that changed a supplier's payment terms |
-| Speed | a few minutes per batch | about a minute or two per ordinary document; long reports take longer |
+| Pages | written and cross-linked with judgement | the same kinds of pages: a summary per document; a page for each company, person and product with its current facts, links and documents; topic pages (tax, contracts, banking, month-end close, ...); decision pages |
+| Figures | read with judgement | every figure, date and number checked against its document before it is written; anything not found there is left out |
+| Contradictions | noticed and put in the Review queue | a figure a later document changes (payment terms, a price, a fee, a notice period, an address) is caught by code and put in the Review queue with both values; other contradictions only when plain |
+| Writing | natural, with judgement about what matters | correct but plainer, and now and then it misreads a role or how two parties relate |
+| Speed | a few minutes per batch | a few minutes per document (about 2 to 4 on Apple silicon); a large upload runs overnight |
 | Asking questions in Claude | yes | needs Claude |
+
+**How they compare, measured.** The model on this Mac read 12 sample documents of a
+fictional small business (contracts, invoices, a quotation and the engagement letter that
+changed its fee, board minutes, a tax return, a bank reconciliation, a ledger and a
+checklist as spreadsheets), an Update Packet, and a supplier page written by hand. The
+Claude column is a reference wiki written for the same documents by Claude's own rules for
+this wiki (`CLAUDE.md`); "before" is the previous version of the model on this Mac:
+
+| Measured | Claude | Model on this Mac | Before this version |
+|---|---|---|---|
+| Facts captured (of 107) | 107 | 107 | 96 |
+| Companies, staff and products with a page (of 14) | 14 | 14 | 13 |
+| Links between them (of 13) | 13 | 13 | 0 |
+| Registration, tax and bank numbers on the right page (of 8) | 8 | 8 | 3 |
+| Planted contradictions caught (of 2) | 2 | 2 | 0 |
+| False alarms in the Review queue | 0 | 0 | 0 |
+| Numbers not in any document | 0 | 0 | 1 |
+| Topic and decision pages expected (of 9) | 9 | 9 | 1 |
+
+The counts do not measure the writing. Read side by side, the model on this Mac still
+mislabels a figure now and then (one quarter's revenue given for another), and its
+overviews are plainer and sometimes misstate how two parties deal with each other. The
+set took 143 minutes on a test machine's processor, without a graphics chip; Apple
+silicon is several times faster.
 
 ## Updating the engine
 

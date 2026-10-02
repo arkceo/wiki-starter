@@ -5,32 +5,48 @@ Used instead of Claude when wiki.config.json says "engine": "local". Nothing lea
 Mac: the model runs in llama.cpp's llama-server, started for the run on 127.0.0.1 and
 stopped afterwards, so its memory is free whenever the wiki is idle.
 
-A small local model is good at reading one document and answering narrow questions; it
-is not reliable at editing many files on its own. So this script does the steps and the
-model only answers, in JSON forced to match a schema:
+A small local model is good at answering one narrow question about one text; it is not
+reliable at editing many files on its own. So this script does the steps, the model only
+answers, in JSON forced to match a schema, and code checks every answer against the
+document before anything is written:
 
   documents (raw/_intake/, already converted to cache/md/ by the runner)
     1. read the Markdown mirror in parts that fit the model's context;
-    2. per part: title, type, date, summary points, facts, companies and people,
-       identifiers, decisions, open questions;
-    3. choose the project folder among those that exist;
-    4. check new facts against the existing pages of the companies and people named;
-    5. only then write: the summary page (wiki/sources/), the pages of the companies and
-       people (wiki/companies/), the project page; then file the original under
-       raw/<project>/, unrenamed unless the name is taken.
-    An identifier (registration or tax number, ...) is kept only if it appears in the
-    document word for word; a conflict goes to wiki/_review.md instead of being written
-    over.
+    2. per part, focused questions that share the document as a prompt prefix (the model
+       reads it once): what it is (title, type, date, summary, decisions, obligations,
+       open questions); who it names (each company, person, product and place, with its role);
+       every figure (amounts, prices, fees, dates, durations, rates, addresses), each
+       labelled with what it is and whom it is about; identifiers; then one more question
+       about the figures and names that patterns find in the text but the answers missed;
+    3. per document: the relationships it states between the parties, the topic pages it
+       informs (finance and legal, how the business runs) and its project folder;
+    4. grounding: a figure, identifier, summary point or decision is kept only if the
+       document contains its numbers and dates (scripts/local_facts.py);
+    5. figures about a company, person or product go into archive/claims.jsonl; a standing
+       term (payment terms, a price, a fee, a notice period, an address) that differs from
+       what an earlier source said is a contradiction: both values and sources go to
+       wiki/_review.md and the page shows the new value with the old one;
+    6. only then write: the document's summary page (wiki/sources/), the pages of the
+       companies and people (wiki/companies/) and products (wiki/products/), topic pages
+       (wiki/finance-legal/, wiki/how-it-runs/), decision pages (wiki/decisions/), the
+       project page; then file the original under raw/<project>/, unrenamed unless the
+       name is taken.
   Update Packets (raw/inbox/)
     parsed by code; one page per packet (wiki/decisions/ or wiki/updates/), a dated entry
-    on every affected page (the model only maps page names it cannot match), review
-    entries for "Supersedes" and "Open questions"; the packet moves to archive/inbox/. A
-    plain note without the packet header is applied as one.
+    on every affected page (the model only maps page names it cannot match, and reads the
+    packet's figures into the claims store), a topic page for an affected page that does
+    not exist yet in a known section, review entries for open questions; the packet moves
+    to archive/inbox/. A plain note without the packet header is applied as one.
+  at the end of the run
+    the model writes a short grounded overview for every page the run touched; code
+    builds the rest of each page's engine block (Current facts, Related, Documents) and the
+    overview's "At a glance".
 
-Existing pages are only appended to, never rewritten. Frontmatter, wikilinks, index.md
-and log.md are written by code, and every string that came from a document or the model
-is escaped, so neither a model mistake nor a hostile document can break the site or put
-markup in it.
+Pages are changed only inside the engine's own block (scripts/local_pages.py), which a
+person's edit locks; everything else on an existing page is only ever appended to.
+Frontmatter, wikilinks, index.md and log.md are written by code, and every string that
+came from a document or the model is escaped, so neither a model mistake nor a hostile
+document can break the site or put markup in it.
 
 Usage:
   local_engine.py run [--server URL]   process everything waiting
@@ -68,12 +84,16 @@ import urllib.request
 
 WIKI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(WIKI_DIR, "scripts"))
+import local_facts as F  # noqa: E402
+import local_pages as LP  # noqa: E402
 import wiki_events  # noqa: E402
 import wiki_netguard  # noqa: E402
+from local_pages import clean_line, esc, label, owner_text, raw_link, yq  # noqa: E402,F401
 
 CHUNK_CHARS = 18000          # about 5-6k tokens: leaves room for instructions and the answer
 MAX_PARTS = 24               # longer documents are summarised from their first parts
 DOC_BUDGET_SECONDS = 2700    # one document may take this long before it counts as failed
+PROSE_BUDGET_SECONDS = 600   # one page's overview, at the end of a run
 TOKEN_NOTE_SECONDS = 1.5     # how often the live line hears how far an answer has got
 HOUSE_RULES_CHARS = 2500
 MAX_PAGE_CHOICES = 150
@@ -100,47 +120,6 @@ def today():
 
 def log(msg):
     wiki_events.log(f"local: {msg}")
-
-
-# =================================================================== escaping ====
-def clean_line(text, limit=400):
-    t = " ".join(str(text or "").split())
-    return t if len(t) <= limit else t[: limit - 1].rstrip() + "…"
-
-
-MD_SPECIAL = re.compile(r"([\\`*_\[\]()!#|~])")
-
-
-def esc(text, limit=400):
-    """Text from a document or the model, for a page body: one line, no HTML, and no
-    Markdown syntax (links, images, code), so it can only ever show as text."""
-    t = clean_line(text, limit).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return MD_SPECIAL.sub(r"\\\1", t)
-
-
-def label(text, limit=120):
-    """Text for a link label or a page title: one line, no brackets, bars or angle
-    brackets (wikilink labels and the site's search results are rendered as HTML)."""
-    t = clean_line(text, limit)
-    for a, b in (("[", "("), ("]", ")"), ("|", "/"), ("<", "‹"), (">", "›"), ("`", "'")):
-        t = t.replace(a, b)
-    return t
-
-
-def owner_text(text):
-    """Text the owner wrote (an Update Packet): Markdown kept, raw HTML and script links not."""
-    t = str(text or "").replace("<", "&lt;")
-    return re.sub(r"\]\(\s*(?:javascript|data|vbscript):", "](#", t, flags=re.I)
-
-
-def yq(value):
-    """A YAML scalar, always double-quoted (frontmatter written by code never breaks)."""
-    return json.dumps(str(value), ensure_ascii=False)
-
-
-def raw_link(path):
-    """A Markdown link to an original, served read-only by the viewer."""
-    return f"[{label(os.path.basename(path))}](/{urllib.parse.quote(path)})"
 
 
 def slugify(text, limit=60):
@@ -174,6 +153,18 @@ def split_suffix(name):
         return full, ""
     core = (" " + full)[: m.start()].strip()
     return (core, m.group(0).strip()) if core else (full, "")
+
+
+def share_a_row(a, b, text):
+    """In a table each row is one record. Two parties are linked from a table only by a row
+    that names both, when either is named only in rows: a ledger's catering line for one
+    customer says nothing of the supplier on the line above. True when it cannot tell."""
+    lines = [(l.lstrip().startswith("|"), f" {norm_full(l)} ") for l in (text or "").splitlines()]
+    ka, kb = (f" {split_suffix(x)[0]} " for x in (a, b))
+    ha, hb = [t for t, l in lines if ka in l], [t for t, l in lines if kb in l]
+    if not ka.strip() or not kb.strip() or not ha or not hb or not (all(ha) or all(hb)):
+        return True
+    return any(t and ka in l and kb in l for t, l in lines)
 
 
 def same_entity(a, b):
@@ -327,14 +318,19 @@ def write(path, text):
 
 
 def append_under(path, heading, lines):
-    """Append bullet lines under a '## heading' section (created at the end if missing)."""
+    """Append bullet lines under a '## heading' section (created at the end if missing).
+    The engine's own block is never written into: a heading inside it does not count, and
+    a section ends where the block starts."""
     text = read(path).rstrip("\n") + "\n"
     block = "".join(l + "\n" for l in lines)
-    m = re.search(rf"^## {re.escape(heading)}\s*$", text, re.M)
+    found = LP.find_block(text)
+    span = (found[0], found[1]) if found else (-1, -1)
+    m = next((x for x in re.finditer(rf"^## {re.escape(heading)}\s*$", text, re.M)
+              if not span[0] <= x.start() < span[1]), None)
     if not m:
         text += f"\n## {heading}\n\n" + block
     else:
-        nxt = re.search(r"^## ", text[m.end():], re.M)
+        nxt = re.search(r"^## |^<!-- wiki-engine:start", text[m.end():], re.M)
         at = m.end() + nxt.start() if nxt else len(text)
         head, tail = text[:at].rstrip("\n") + "\n", text[at:]
         text = head + block + ("\n" + tail if tail else "")
@@ -393,6 +389,15 @@ def place(src, dest):
 
 
 # ===================================================================== model =====
+def supports(binary, flag):
+    """Whether this llama-server knows a command-line flag (older builds refuse unknown ones)."""
+    try:
+        r = subprocess.run([binary, "--help"], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        return flag in (r.stdout + r.stderr)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 class Model:
     """A llama-server on 127.0.0.1: either one we start on first use (and stop), or a
     given URL. An Update Packet usually needs no model at all, so it is not loaded until a
@@ -429,6 +434,11 @@ class Model:
                 "-ngl", str(self.cfg.get("gpuLayers", 99)), "--jinja"]
         if self.cfg.get("threads"):
             args += ["-t", str(int(self.cfg["threads"]))]
+        if supports(binary, "--cache-ram"):
+            # Newer servers also keep past prompts in RAM, up to 8 GB by default: on a 16 GB
+            # Mac that is memory the model needs. The questions about one document reuse
+            # it from the model's working memory anyway, so this extra cache is off.
+            args += ["--cache-ram", str(int(self.cfg.get("cacheRamMiB", 0)))]
         os.makedirs(os.path.dirname(wiki_events.LOG_FILE), exist_ok=True)
         logf = open(wiki_events.LOG_FILE, "a")
         log(f"starting the model ({os.path.basename(model)})")
@@ -482,6 +492,7 @@ class Model:
             "response_format": {"type": "json_schema",
                                 "json_schema": {"name": "answer", "strict": True, "schema": schema}},
             "chat_template_kwargs": {"enable_thinking": False},
+            "cache_prompt": True,  # questions about one document share it as their prefix
         }
         last = None
         for attempt in range(2):
@@ -525,6 +536,8 @@ class Model:
                     return json.loads(r.read())  # a server that does not stream
                 return self._read_stream(r, time.time() + timeout)
         except urllib.error.HTTPError as e:
+            if e.code == 503:  # still loading, or overloaded: not this file's fault
+                raise ModelUnavailable(f"the model is not ready ({e.read()[:200]!r})")
             # The server answered: a problem with this request (too long, ...), not the model.
             raise RuntimeError(f"the model refused the request ({e.code}: {e.read()[:200]!r})")
         except (socket.timeout, TimeoutError):
@@ -590,25 +603,131 @@ def text(n):
     return S("string", maxLength=n)
 
 
-EXTRACT_SCHEMA = obj({
+KINDS = ["company", "person", "product", "place", "other"]
+# The topic pages a small business usually keeps. A document adds to these (or to topic
+# pages the wiki already has); a new topic is proposed only when none fits, so the same
+# subject never ends up spread over pages named after single documents.
+TOPICS = [
+    ("finance-legal", "Sales and service tax (SST)"),
+    ("finance-legal", "Income tax and the tax agent"),
+    ("finance-legal", "Supplier contracts and terms"),
+    ("finance-legal", "Customer contracts and terms"),
+    ("finance-legal", "Banking and bank reconciliations"),
+    ("finance-legal", "Payroll and statutory contributions"),
+    ("finance-legal", "Premises and leases"),
+    ("finance-legal", "Insurance"),
+    ("finance-legal", "Loans and financing"),
+    ("finance-legal", "Invoicing and receivables"),
+    ("finance-legal", "Purchasing and payables"),
+    ("finance-legal", "Licences, permits and registrations"),
+    ("finance-legal", "Board and company secretarial"),
+    ("finance-legal", "Financial results and budgets"),
+    ("how-it-runs", "Month-end close"),
+    ("how-it-runs", "Stock and inventory counts"),
+    ("how-it-runs", "Approving payments"),
+    ("how-it-runs", "Expansion and new outlets"),
+    ("how-it-runs", "Staff, roles and rostering"),
+    ("how-it-runs", "Quality and supplier performance"),
+    ("how-it-runs", "Customer service"),
+    ("how-it-runs", "Equipment and maintenance"),
+]
+DECISION_TYPES = {"minutes", "letter", "email", "policy", "procedure", "report", "presentation", "other"}
+DECISION_CUE = re.compile(r"\b(resolved|resolution|decided|decision|approved|agreed to|agreed that|will proceed)\b", re.I)
+SEED_PAGES = {"index", "how-this-wiki-works", "raw-to-markdown-conversion"}
+THIS_DOC = "this document"
+SECTIONS = {"finance-legal": "Finance and legal", "how-it-runs": "How it runs"}
+
+OVERVIEW_SCHEMA = obj({
     "title": text(160),
     "doc_type": S("string", enum=DOC_TYPES),
     "doc_date": text(10),
     "summary": S("array", items=text(300), maxItems=8),
-    "facts": S("array", maxItems=15, items=obj({"about": text(120), "fact": text(300)})),
-    "entities": S("array", maxItems=12, items=obj({
-        "name": text(120), "kind": S("string", enum=["company", "person", "product", "other"]),
-        "role": text(160)})),
-    "identifiers": S("array", maxItems=10, items=obj({
-        "entity": text(120), "kind": S("string", enum=ID_KINDS), "value": text(80)})),
-    "decisions": S("array", items=text(300), maxItems=8),
+    "decisions": S("array", maxItems=5, items=obj({"title": text(90), "decision": text(300), "date": text(10)})),
+    "obligations": S("array", items=text(240), maxItems=8),
     "open_questions": S("array", items=text(300), maxItems=5),
 })
+PARTIES_SCHEMA = obj({"parties": S("array", maxItems=25, items=obj({
+    "name": text(120), "kind": S("string", enum=KINDS), "role": text(160)}))})
+
+
+def figures_schema(names, n=30):
+    return obj({"figures": S("array", maxItems=n, items=obj({
+        "about": S("string", enum=names + [THIS_DOC]), "attribute": S("string", enum=F.ATTRIBUTES),
+        "qualifier": text(100), "value": text(120)}))})
+
+
+def ids_schema(names):
+    return obj({"identifiers": S("array", maxItems=10, items=obj({
+        "entity": S("string", enum=names), "kind": S("string", enum=ID_KINDS), "value": text(80)}))})
+
+
+def second_schema(names, figures, people):
+    props = {}
+    if figures:
+        props["figures"] = S("array", maxItems=len(figures), items=obj({
+            "item": S("string", enum=figures), "about": S("string", enum=names + [THIS_DOC]),
+            "attribute": S("string", enum=F.ATTRIBUTES), "qualifier": text(100)}))
+    if people:
+        props["parties"] = S("array", maxItems=len(people), items=obj({
+            "name": S("string", enum=people), "kind": S("string", enum=KINDS), "role": text(160)}))
+    return obj(props)
+
+
+def relations_schema(names):
+    return obj({"relations": S("array", maxItems=15, items=obj({
+        "subject": S("string", enum=names), "relation": S("string", enum=LP.RELATIONS),
+        "object": S("string", enum=names)}))})
+
+
+def topics_schema(choices, proj_list):
+    props = {"topics": S("array", maxItems=3, items=obj({
+        "page": S("string", enum=choices + ["new"]), "section": S("string", enum=list(SECTIONS)),
+        "title": text(80), "points": S("array", items=text(240), maxItems=4)}))}
+    if len(proj_list) > 1:
+        props["project"] = S("string", enum=proj_list)
+    return obj(props)
+
 
 CONDENSE_SCHEMA = obj({"title": text(160), "summary": S("array", items=text(300), maxItems=10)})
 
 CONFLICT_SCHEMA = obj({"conflicts": S("array", maxItems=5, items=obj({
     "existing": text(240), "new": text(240), "explanation": text(240)}))})
+
+PROSE_SCHEMA = obj({"sentences": S("array", items=text(300), maxItems=4)})
+
+Q_OVERVIEW = (
+    "Answer about this document: its title (as a reader would name it, with its number if it has "
+    "one), its type, its date (YYYY-MM-DD; empty if it has none), up to 8 summary points that "
+    "carry the key names, amounts and dates, the decisions it records (each with a short title, "
+    "the decision in one sentence, and its date), the obligations it sets (who must do what, by "
+    "when), and the questions it leaves open.")
+Q_PARTIES = (
+    "List every company, organisation, person and product or service this document names, and "
+    "each place that matters to the business (a site, an outlet, an office). For each: the name "
+    "exactly as written (a company's full legal name when the document gives it; a person's name "
+    "without Mr or Ms), what kind it is, and its role in this document, for example supplier, "
+    "buyer, customer, landlord, tax agent, director, signatory, finance manager, contact, product "
+    "bought.")
+Q_FIGURES = (
+    "List every figure this document states: amounts, prices, fees, quantities, percentages, "
+    "dates, deadlines, durations and periods, rates, and addresses. One entry per figure, "
+    "including table rows. For each:\n"
+    "- about: whom or what the figure describes, from this list: {names}; or \"this document\" "
+    "for the document's own numbers, totals and dates;\n"
+    "- attribute: what kind of figure it is. payment_terms is only the time a buyer has to pay; "
+    "a notice to end or change something is notice_period; how long an agreement runs is "
+    "contract_term; a charge for a service is fee;\n"
+    "- qualifier: a few words saying exactly what it is for, e.g. \"washed arabica coffee beans\", "
+    "\"annual tax compliance\", \"price revision notice\", \"Q1 2026\";\n"
+    "- value: copied exactly as written, with its currency or unit.")
+# For short texts (a page a person wrote, an Update Packet): the full list above can get an
+# empty answer from a small model on a few lines; this plain question does not.
+Q_SHORT = ("What payment terms, prices, fees, quantities, periods, dates, rates or addresses does this text "
+           "give{about}? List each one, with what it is for.")
+Q_IDS = (
+    "List the identifiers this document gives for {names}: registered names, company or "
+    "registration numbers, tax numbers (TIN, SST, GST), licence numbers and bank account numbers. "
+    "Copy each value exactly as written. Leave the list empty if there are none.")
 
 
 def system_prompt(house_rules):
@@ -640,7 +759,32 @@ class Wiki:
         fm, _ = split_frontmatter(read(rel))
         self.pages[rel] = {"title": fm_get(fm, "title") or os.path.basename(rel)[:-3],
                            "aliases": fm_list(fm, "aliases") or [],
-                           "tags": [t.lower() for t in (fm_list(fm, "tags") or [])]}
+                           "tags": [t.lower() for t in (fm_list(fm, "tags") or [])],
+                           "engine": fm_get(fm, "engine") == "local"}
+
+    def reserve(self, rel, title, kind, aliases=()):
+        """A page this document will create: known now, so links to it get its title."""
+        self.pages.setdefault(rel, {"title": title, "aliases": list(aliases), "tags": [kind], "engine": True})
+
+    def find_product(self, name):
+        """The product's page: the same name, or a name whose words are all in the other's
+        ("coffee beans" and "washed arabica coffee beans") when only one page fits."""
+        prods = [(rel, [p["title"]] + p["aliases"]) for rel, p in self.pages.items() if rel.startswith("wiki/products/")]
+        hits = [rel for rel, names in prods if any(norm_full(n) == norm_full(name) for n in names)]
+        if hits:
+            return hits[0]
+        def words(n):  # "coffee bean deliveries" and "coffee beans" are the same product
+            return {w[:-1] if len(w) > 3 and w.endswith("s") else w for w in norm_full(PRODUCT_NOISE.sub(" ", n)).split()}
+        mine = words(name)
+        close = [rel for rel, names in prods
+                 if len(mine) >= 2 and any(words(n) <= mine or mine <= words(n) for n in names)]
+        return close[0] if len(close) == 1 else None
+
+    def topics(self):
+        """Topic pages a document can add to: finance-legal/ and how-it-runs/, without the
+        folder index and the pages that explain the wiki itself."""
+        return [(rel, p["title"]) for rel, p in sorted(self.pages.items())
+                if rel.split("/")[1] in SECTIONS and os.path.basename(rel)[:-3] not in SEED_PAGES]
 
     def find_entity(self, name, kind):
         """The existing page of this company or person, if any. A person never matches a
@@ -655,7 +799,11 @@ class Wiki:
             names = [p["title"]] + p["aliases"]
             if any(norm_full(n) == norm_full(name) for n in names):
                 exact.append(rel)
-            elif kind == "company" and any(same_entity(n, name) for n in names):
+            # The short alias the engine derives ("Northwind Trading") must not let
+            # "Northwind Trading Pte Ltd" match the "... Sdn Bhd" page: only the title and
+            # aliases that carry a legal suffix are compared by their core name.
+            elif kind == "company" and any(same_entity(n, name) for n in names
+                                           if n == p["title"] or split_suffix(n)[1]):
                 close.append(rel)
         if exact:
             return exact[0]
@@ -687,14 +835,20 @@ class Wiki:
         return f"[[{rel[len('wiki/'):-len('.md')]}|" in read(page)
 
     def unique_path(self, folder, slug, source=None):
-        """wiki/<folder>/<slug>.md, or -2, -3... when a different source already owns it."""
+        """wiki/<folder>/<slug>.md, or -2, -3... when a different source already owns it,
+        or a page this run has planned but not written yet."""
         n = 1
         while True:
             rel = f"wiki/{folder}/{slug}{'' if n == 1 else '-' + str(n)}.md"
             if rel not in self.pages:
                 return rel
-            if source and source in (fm_list(split_frontmatter(read(rel))[0], "sources") or []):
-                return rel  # the same document again (a retry): rewrite its own page
+            if source and os.path.exists(os.path.join(WIKI_DIR, rel)):
+                srcs = fm_list(split_frontmatter(read(rel))[0], "sources") or []
+                if source in srcs:
+                    return rel  # the same document again (a retry): rewrite its own page
+                if any(os.path.basename(x) == os.path.basename(source) and x.startswith("raw/")
+                       and not os.path.exists(os.path.join(WIKI_DIR, x)) for x in srcs):
+                    return rel  # an earlier attempt that never got as far as filing it
             n += 1
 
 
@@ -710,7 +864,10 @@ def projects():
 
 
 class Run:
-    current = ""  # the file being worked on, for events
+    current = ""      # the file being worked on, for events
+    company = ""      # the business's own company (wiki.config.json "company")
+    doc_budget = DOC_BUDGET_SECONDS
+    prose_budget = PROSE_BUDGET_SECONDS
 
 
 def say(phase, detail="", **fields):
@@ -761,7 +918,391 @@ def mirror_path(src):
     return "cache/md/" + src[len("raw/"):] + ".md"
 
 
-def process_document(model, wiki, src, sysmsg):
+def doc_prefix(name, part, i, n):
+    """The start of every question about one part: the same text each time, so the model
+    server reuses what it already read (its prompt cache) and only reads the question."""
+    return (f"Document file name: {name}\n" + (f"This is part {i} of {n}.\n" if n > 1 else "")
+            + "<document>\n" + part + "\n</document>\n\n")
+
+
+def ask_safe(model, sysmsg, user, schema, max_tokens, what):
+    """A question whose failure (an answer in the wrong shape) costs only its own answer."""
+    try:
+        return model.ask(sysmsg, user, schema, max_tokens=max_tokens)
+    except (ModelUnavailable, DocTimeout):
+        raise
+    except Exception as e:
+        log(f"{what} skipped: {e}")
+        return {}
+
+
+PART_PAYMENT = re.compile(r"\b(instal+ments?|partial|part[- ]payment|deposit paid|advance|down ?payment|balance due|"
+                          r"first|second|third|final) (instal+ment|payment|part)\b|\binstal+ment\b", re.I)
+UPPER_KEEP = {"Plc": "PLC", "Llc": "LLC", "Llp": "LLP", "Gmbh": "GmbH", "Pte": "Pte", "Ii": "II", "Iii": "III"}
+LEGAL_END = re.compile(rf"(?:^|\s)(?i:{F.COMPANY_SUFFIX})\s*$")
+
+
+def nice_title(title):
+    """'SST-02 RETURN (SERVICE TAX) — SUMMARY' (a heading) -> 'SST-02 return (service tax) — summary'."""
+    letters = [c for c in title if c.isalpha()]
+    if len(letters) < 8 or sum(c.isupper() for c in letters) < 0.8 * len(letters):
+        return title
+    words = [w if re.search(r"\d", w) else w.lower() for w in title.split(" ")]
+    out = " ".join(words)
+    return out[:1].upper() + out[1:]
+
+
+def nice_name(name):
+    """'NORTHWIND TRADING SDN BHD' (a letterhead) -> 'Northwind Trading Sdn Bhd'."""
+    if not name.isupper() or len(name) <= 4:
+        return name
+    words = [w.capitalize() if w.isalpha() else w for w in name.split(" ")]
+    return " ".join(UPPER_KEEP.get(w, w) for w in words)
+
+
+def clean_name(name):
+    return nice_name(clean_line(F.HONORIFIC_RE.sub("", clean_line(name, 120)), 120).strip(" ,.;:"))
+
+
+PRODUCT_NOISE = re.compile(r"\b(deliver(?:y|ies)|orders?|shipments?|purchases?|consignments?|batch(?:es)?)\b", re.I)
+PERSON_NAME = re.compile(r"(?:[A-Z][a-z'’.-]+|bin|binti|bte|a/l|a/p|van|de|[A-Z]\.)(?:\s+(?:[A-Z][a-z'’.-]+|bin|binti|bte|"
+                         r"a/l|a/p|van|de|[A-Z]\.)){1,5}")
+
+
+def clean_parties(items):
+    out = []
+    for e in items or []:
+        if not isinstance(e, dict):
+            continue
+        name = clean_name(e.get("name"))
+        kind = e.get("kind") if e.get("kind") in KINDS else "other"
+        if kind in ("person", "other") and LEGAL_END.search(name):
+            kind = "company"  # "... Sdn Bhd" is a company whatever the answer says
+        if kind == "person" and not PERSON_NAME.fullmatch(name):
+            kind = "other"  # "Directors", "Shift leads": a group, not a person with a page
+        if kind == "product" and re.search(r"\d", name) and not re.search(r"[a-z]{3,}", name):
+            kind = "other"  # "SST-02": a form, not a product
+        if norm_full(name):
+            out.append({"name": name, "kind": kind, "role": clean_line(e.get("role"), 160)})
+    return out
+
+
+def merge_parties(parties):
+    """One entry per party: the same name twice, or a company with and without its legal
+    suffix, is one party; its roles are joined and the fuller name kept."""
+    out = []
+    for p in parties:
+        for q in out:
+            same = norm_full(q["name"]) == norm_full(p["name"])
+            if same or ("company" in (p["kind"], q["kind"]) and same_entity(q["name"], p["name"])):
+                if q["kind"] != p["kind"] and "company" in (p["kind"], q["kind"]):
+                    q["kind"] = "company"
+                elif q["kind"] != p["kind"] and not same:
+                    continue
+                if len(p["name"]) > len(q["name"]) or (q["name"].isupper() and not p["name"].isupper()
+                                                       and len(p["name"]) >= len(q["name"])):
+                    q["name"] = p["name"]
+                if p["role"] and norm_full(p["role"]) not in norm_full(q["role"]):
+                    q["role"] = clean_line(f"{q['role']}; {p['role']}" if q["role"] else p["role"], 200)
+                q["variants"] = list(dict.fromkeys(q.get("variants", []) + [p["name"]] + p.get("variants", [])))
+                break
+        else:
+            out.append(dict(p, variants=list(dict.fromkeys([p["name"]] + p.get("variants", [])))))
+    return out
+
+
+def named(parties):
+    """Parties that can have a page (and be what a figure is about)."""
+    return [p["name"] for p in parties if p["kind"] in ("company", "person", "product")]
+
+
+def mentioned(name, names):
+    """Whether a name found by pattern is among the model's names (either way round)."""
+    n = norm_full(name)
+    return any(n == norm_full(x) or same_entity(name, x) or (len(n) > 5 and (n in norm_full(x) or norm_full(x) in n))
+               for x in names)
+
+
+def id_tokens(part):
+    """Identifier-like tokens with a label in front of them (registration, tax, bank...)."""
+    toks = re.findall(r"(?<![\w\-/])[A-Za-z]{0,4}\d[\w\-/]*\d(?:[ ]\d{3,})*(?:[ ]\(\w+-\w\))?", part)
+    return [t for t in dict.fromkeys(toks) if identifier_kind(t, part)]
+
+
+def read_part(model, sysmsg, name, part, i, n, known):
+    """The focused questions about one part of a document. known: parties found in the
+    parts before it."""
+    pre = doc_prefix(name, part, i, n)
+    say("ask", "reading what it is about", n=i, of=n)
+    ov = model.ask(sysmsg, pre + Q_OVERVIEW, OVERVIEW_SCHEMA, max_tokens=1500)
+    say("ask", "finding who and what it names", n=i, of=n)
+    parties = clean_parties(ask_safe(model, sysmsg, pre + Q_PARTIES, PARTIES_SCHEMA, 1500, "parties").get("parties"))
+    names = list(dict.fromkeys(named(merge_parties(known + parties))))[:40]
+    say("ask", "finding every figure and date", n=i, of=n)
+    q = Q_FIGURES.format(names="; ".join(names) or "(none)")
+    figures = ask_safe(model, sysmsg, pre + q, figures_schema(names), 3000, "figures").get("figures") or []
+    ids = []
+    if names and id_tokens(part):
+        say("ask", "reading registration, tax and bank numbers", n=i, of=n)
+        ids = ask_safe(model, sysmsg, pre + Q_IDS.format(names="; ".join(names)), ids_schema(names), 800,
+                       "identifiers").get("identifiers") or []
+
+    # A second look at what patterns find in the text but the answers left out.
+    got = F.numbers_in(" ".join(str(f.get("value", "")) for f in figures if isinstance(f, dict)))
+    fig_c = [c for c in F.figure_candidates(part) if not F.covered(c["value"], got)][:20]
+    comp_c, people_c = F.party_candidates(part)
+    have = [p["name"] for p in known + parties]
+    party_c = [x for x in comp_c + people_c if not mentioned(x, have)][:10]
+    if fig_c or party_c:
+        say("ask", f"asking about {len(fig_c) + len(party_c)} more things it found", n=i, of=n)
+        lines = ["These appear in the document but are not in your lists yet. Say what each one is, with "
+                 "the same labels as before. Leave out anything that is only a heading, a page number or a "
+                 "reference number of the document itself."]
+        if fig_c:
+            lines += ["", "Figures:"] + [f"- {c['value']}  (in: {c['context']})" for c in fig_c]
+        if party_c:
+            lines += ["", "Names:"] + [f"- {x}" for x in party_c]
+        a = ask_safe(model, sysmsg, pre + "\n".join(lines),
+                     second_schema(names, [c["value"] for c in fig_c], party_c), 1500, "second look")
+        for f in a.get("figures") or []:
+            if isinstance(f, dict) and f.get("item"):
+                figures.append({"about": f.get("about"), "attribute": f.get("attribute"),
+                                "qualifier": f.get("qualifier"), "value": f["item"]})
+        parties += clean_parties(a.get("parties"))
+    return {"overview": ov, "parties": parties, "figures": figures, "identifiers": ids}
+
+
+def without_value(qualifier, value):
+    """A qualifier says what a figure is for, not the figure again ("30 days from invoice
+    date" for "30 days" is "from invoice date")."""
+    if value and value.lower() in qualifier.lower():
+        i = qualifier.lower().index(value.lower())
+        qualifier = (qualifier[:i] + qualifier[i + len(value):]).strip(" ,;:-()")
+    return clean_line(qualifier, 100)
+
+
+def grounded_list(items, nums, limit):
+    out = []
+    for x in items or []:
+        x = clean_line(x, limit)
+        if not x:
+            continue
+        bad = F.ungrounded_numbers(x, nums)
+        if bad:
+            log(f"dropped a point with numbers the document does not contain ({', '.join(bad)}): {x[:80]}")
+            continue
+        out.append(x)
+    return out
+
+
+def merge_parts(results, body):
+    """One document from its parts' answers, keeping only what the document contains."""
+    sc, nums = F.canon(body), F.numbers_in(body)
+    first = (results[0] if results else {}).get("overview") or {}
+    m = {"title": nice_title(clean_line(first.get("title") or "", 160)), "doc_type": first.get("doc_type") or "other",
+         "doc_date": first.get("doc_date") or "", "summary": [], "decisions": [], "obligations": [],
+         "open_questions": [], "parties": [], "figures": [], "identifiers": [], "dropped": 0}
+    if m["doc_type"] not in DOC_TYPES:
+        m["doc_type"] = "other"
+    if F.ungrounded_numbers(m["title"], nums):
+        m["title"] = ""
+    for r in results:
+        ov = r.get("overview") or {}
+        if not m["doc_date"] and ov.get("doc_date"):
+            m["doc_date"] = ov["doc_date"]
+        m["summary"] += grounded_list(ov.get("summary"), nums, 300)
+        m["obligations"] += grounded_list(ov.get("obligations"), nums, 240)
+        m["open_questions"] += grounded_list(ov.get("open_questions"), nums, 300)
+        for dcs in ov.get("decisions") or []:
+            if not isinstance(dcs, dict) or not grounded_list([dcs.get("decision")], nums, 300):
+                continue
+            date = dcs.get("date") if re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(dcs.get("date") or "")) else ""
+            m["decisions"].append({"title": clean_line(dcs.get("title") or dcs.get("decision"), 90),
+                                   "decision": clean_line(dcs.get("decision"), 300),
+                                   "date": date if date and not F.ungrounded_numbers(date, nums) else ""})
+        m["parties"] += r.get("parties") or []
+        m["identifiers"] += [i for i in r.get("identifiers") or [] if isinstance(i, dict)]
+        for f in r.get("figures") or []:
+            if not isinstance(f, dict) or f.get("attribute") not in F.ATTRIBUTES:
+                continue
+            value = clean_line(f.get("value"), 120)
+            if not value or not F.grounded(value, sc, nums):
+                m["dropped"] += 1
+                if value:
+                    log(f"dropped a figure the document does not contain: {value[:60]}")
+                continue
+            q = without_value(clean_line(f.get("qualifier"), 100), value)
+            if F.ungrounded_numbers(q, nums):
+                q = ""
+            attribute = f["attribute"] if F.fits(f["attribute"], value) else "other"
+            if attribute in F.COMPARED and PART_PAYMENT.search(q + " " + value):
+                attribute = "amount"  # "first instalment" of a fee is a payment, not the fee
+            m["figures"].append({"about": clean_line(f.get("about"), 120) or THIS_DOC,
+                                 "attribute": attribute, "qualifier": q, "value": value})
+    m["parties"] = merge_parties(m["parties"])
+    for p in m["parties"]:
+        if F.ungrounded_numbers(p["role"], nums):
+            p["role"] = ""
+    seen_d, decisions = set(), []
+    for dc in m["decisions"]:
+        if F.ungrounded_numbers(dc["title"], nums):
+            dc["title"] = clean_line(dc["decision"], 90)
+        if F.canon(dc["title"]) not in seen_d:
+            seen_d.add(F.canon(dc["title"]))
+            decisions.append(dc)
+    m["decisions"] = decisions
+    seen, figs = set(), []
+    for f in m["figures"]:
+        k = (norm_full(f["about"]), f["attribute"], F.norm_value(f["attribute"], f["value"]), F.canon(f["qualifier"]))
+        if k not in seen:
+            seen.add(k)
+            figs.append(f)
+    m["figures"] = figs
+    for k in ("summary", "obligations", "open_questions"):
+        m[k] = list(dict.fromkeys(m[k]))
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", m["doc_date"] or "") or F.ungrounded_numbers(m["doc_date"], nums):
+        m["doc_date"] = ""
+    return m
+
+
+def ask_relations(model, sysmsg, d, pre):
+    people = [p for p in d["parties"] if p["kind"] in ("company", "person", "product")]
+    names = [p["name"] for p in people]
+    if len(names) < 2:
+        return []
+    say("ask", "linking how the parties relate")
+    listing = "\n".join(f"- {p['name']} ({p['kind']}): {p['role'] or 'named'}" for p in people)
+    q = ((pre or f"Document: {d['title']}\n" + "\n".join(f"- {s}" for s in d["summary"]) + "\n\n")
+         + "Which relationships between these parties does the document state?\n" + listing + "\n\n"
+         "Answer with subject, relation and object, using the names exactly as listed: a person's place "
+         "at a company (director_of, employee_of, signatory_for, contact_for), how companies deal with "
+         "each other (supplier_of, customer_of, landlord_of, tenant_of, adviser_to, bank_of, ...), and "
+         "who supplies a product (supplier_of). Only what the document states.")
+    a = ask_safe(model, sysmsg, q, relations_schema(names), 900, "relationships")
+    out, seen = [], set()
+    for r in a.get("relations") or []:
+        if not isinstance(r, dict) or r.get("subject") == r.get("object") or r.get("relation") not in LP.RELATIONS:
+            continue
+        k = (r["subject"], r["relation"], r["object"])
+        if k not in seen and r["subject"] in names and r["object"] in names:
+            seen.add(k)
+            out.append({"subject": r["subject"], "relation": r["relation"], "object": r["object"]})
+    return out
+
+
+# A party's role in a document says how it deals with the business itself.
+ROLE_LINKS = [
+    (r"\b(supplier|vendor|supplies|seller)\b", "supplier_of", False),
+    (r"\b(landlord|lessor)\b", "landlord_of", False),
+    (r"\b(tax agent|accountant|auditor|advis[eo]r|consultant|lawyer|solicitor|company secretary)\b", "adviser_to", False),
+    (r"\bbank\b", "bank_of", False),
+]
+PERSON_LINKS = [(r"\bdirector\b", "director_of"), (r"\b(manager|officer|clerk|executive|staff|accountant|assistant)\b",
+                                                      "employee_of")]
+
+
+def role_relations(d):
+    """Links the answers left out but the roles state: a company named as a supplier,
+    landlord, adviser or bank deals with the business itself (a "customer" is left to the
+    answers: a model calls a payee that too); a product has the one
+    company named as its seller; in a document of the business alone, its people work there."""
+    own = next((p for p in d["parties"] if p["kind"] == "company" and Run.company
+                and same_entity(Run.company, p["name"])), None)
+    linked = {(r["subject"], r["object"]) for r in d["relations"]} | {(r["object"], r["subject"]) for r in d["relations"]}
+    out = []
+    companies = [p for p in d["parties"] if p["kind"] == "company"]
+    if own:
+        for p in companies:
+            if p is own or (p["name"], own["name"]) in linked:
+                continue
+            for rx, relation, reverse in ROLE_LINKS:
+                if re.search(rx, p["role"] or "", re.I):
+                    s_, o_ = (own["name"], p["name"]) if reverse else (p["name"], own["name"])
+                    out.append({"subject": s_, "relation": relation, "object": o_})
+                    break
+        if len(companies) == 1:
+            for p in d["parties"]:
+                if p["kind"] != "person" or any(p["name"] in pair for pair in linked):
+                    continue
+                for rx, relation in PERSON_LINKS:
+                    if re.search(rx, p["role"] or "", re.I):
+                        out.append({"subject": p["name"], "relation": relation, "object": own["name"]})
+                        break
+    sellers = [p for p in companies if re.search(r"\b(supplier|vendor|supplies|seller|sells)\b", p["role"] or "", re.I)]
+    for p in d["parties"]:
+        if p["kind"] == "product" and len(sellers) == 1 and not any(p["name"] in pair for pair in linked):
+            out.append({"subject": sellers[0]["name"], "relation": "supplier_of", "object": p["name"]})
+    return out
+
+
+def topic_match(title, existing):
+    """An existing topic page with (nearly) the same title as a proposed one."""
+    words = lambda t: {w for w in F.WORD.findall(F.canon(t)) if w not in F.STOP}  # noqa: E731
+    tok = words(title)
+    best, score = None, 0.0
+    for rel, t in existing:
+        if slugify(t) == slugify(title):
+            return rel
+        other = words(t)
+        if tok and other:
+            s = len(tok & other) / min(len(tok), len(other))
+            if s > score:
+                best, score = rel, s
+    return best if score >= 0.67 else None
+
+
+def ask_topics(model, sysmsg, d, wiki, proj_list, pre):
+    existing = wiki.topics()[:80]
+    have = {slugify(t) for _, t in existing}
+    choices = [(rel, t, rel.split("/")[1]) for rel, t in existing]
+    choices += [(None, t, sec) for sec, t in TOPICS if slugify(t) not in have
+                and not topic_match(t, existing)]
+    titles = list(dict.fromkeys(t for _, t, _ in choices))
+    say("ask", "choosing the topic pages it adds to")
+    listing = "\n".join(f"- {t} ({SECTIONS[sec]})" for _, t, sec in choices)
+    q = ((pre or f"Document: {d['title']}\n" + "\n".join(f"- {s}" for s in d["summary"]) + "\n\n")
+         + "Which of these topic pages of the business's wiki should this document add to?\n\n" + listing
+         + "\n\nChoose up to three that the document has something to say about. Answer \"new\" (with a short "
+         "title) only for a subject none of these covers and a business keeps one page on; never a page for this "
+         "one document, a company, a person or a product. For each topic, give up to 4 short points from this "
+         "document that belong on that page, each a full sentence that names what it is about."
+         + ("\n\nAlso choose its project folder: 'general' unless one clearly fits." if len(proj_list) > 1 else ""))
+    a = ask_safe(model, sysmsg, q, topics_schema(titles, proj_list), 1200, "topics")
+    nums = F.numbers_in(d["_body"])
+    out = []
+    for t in a.get("topics") or []:
+        if not isinstance(t, dict):
+            continue
+        points = grounded_list(t.get("points"), nums, 240)
+        if not points:
+            continue
+        if t.get("page") and t["page"] != "new":
+            rel, title, sec = next(((r, x, sc) for r, x, sc in choices if x == t["page"]), (None, None, None))
+            if title:
+                out.append({"rel": rel, "title": title, "section": sec, "points": points})
+            continue
+        title = label(clean_line(t.get("title"), 80), 80)
+        section = t.get("section") if t.get("section") in SECTIONS else "finance-legal"
+        if not norm_full(title) or F.ungrounded_numbers(title, nums):
+            continue
+        if topic_match(title, [("doc", d["title"]), ("doc", d.get("_name", ""))]):
+            log(f"topic {title!r} is the document itself; left out")
+            continue
+        rel = topic_match(title, existing + [(o["rel"], o["title"]) for o in out if o["rel"]])
+        out.append({"rel": rel, "title": wiki.pages[rel]["title"] if rel in wiki.pages else title,
+                    "section": section, "points": points})
+    merged = {}
+    for t in out:
+        key = t["rel"] or ("new", slugify(t["title"]))
+        if key in merged:
+            merged[key]["points"] = list(dict.fromkeys(merged[key]["points"] + t["points"]))
+        else:
+            merged[key] = t
+    project = a.get("project") if a.get("project") in proj_list else "general"
+    return list(merged.values())[:3], project
+
+
+def process_document(model, wiki, claims, src, sysmsg, touched):
     Run.current = src
     name = os.path.basename(src)
     mirror = mirror_path(src)
@@ -780,103 +1321,64 @@ def process_document(model, wiki, src, sysmsg):
             + ". It stays in the queue; check that it opens and is not a scan without OCR."])
         return False
 
-    model.deadline = time.time() + DOC_BUDGET_SECONDS
+    model.deadline = time.time() + Run.doc_budget
     try:
         # 1. Every question first ...
         parts = chunks_of(body)
         truncated = len(parts) > MAX_PARTS
         parts = parts[:MAX_PARTS]
-        results = []
+        results, known = [], []
         for i, part in enumerate(parts, 1):
             if len(parts) > 1:
                 wiki_events.emit("progress", file=src, msg=f"Reading {name}, part {i} of {len(parts)}")
-                say("ask", "pulling out what it says", n=i, of=len(parts))
-            else:
-                say("ask", "pulling out what it says")
-            q = (f"Document file name: {name}\n"
-                 + (f"This is part {i} of {len(parts)}.\n" if len(parts) > 1 else "")
-                 + "Extract what it states.\n\n<document>\n" + part + "\n</document>")
-            results.append(model.ask(sysmsg, q, EXTRACT_SCHEMA, max_tokens=2000))
-        d = merge_parts(results)
+            r = read_part(model, sysmsg, name, part, i, len(parts), known)
+            known = merge_parties(known + r["parties"])
+            results.append(r)
+        d = merge_parts(results, body)
+        d["_body"], d["_name"] = body, os.path.splitext(name)[0]
+        if d["doc_type"] not in DECISION_TYPES or not DECISION_CUE.search(body):
+            d["decisions"] = []  # terms of an invoice or a contract are facts, not decisions
         if len(results) > 1:
             say("ask", f"condensing the {len(results)} parts into one summary")
             points = "\n".join(f"- {p}" for p in d["summary"])
-            c = model.ask(sysmsg, f"These are summary points from the parts of one document, {name}.\n"
-                          "Write its title and a summary of at most 10 points.\n\n" + points,
-                          CONDENSE_SCHEMA, max_tokens=1200)
-            d["title"] = clean_line(c.get("title") or d["title"], 160)
-            d["summary"] = [clean_line(x, 300) for x in c.get("summary") or [] if str(x).strip()] or d["summary"]
-
-        proj_list = projects()
-        project = "general"
-        if len(proj_list) > 1:
-            say("ask", "choosing its project folder")
-            pick = model.ask(sysmsg, "Which project folder does this document belong to? Choose "
-                             "'general' unless one clearly fits.\n\nProjects: " + ", ".join(proj_list)
-                             + f"\n\nDocument: {d['title']}\n" + "\n".join(d["summary"][:6]),
-                             obj({"project": S("string", enum=proj_list)}), max_tokens=60)
-            project = pick.get("project") or "general"
-
+            c = ask_safe(model, sysmsg, f"These are summary points from the parts of one document, {name}.\n"
+                         "Write its title and a summary of at most 10 points.\n\n" + points,
+                         CONDENSE_SCHEMA, 1200, "condensing")
+            nums = F.numbers_in(body)
+            if c.get("title") and not F.ungrounded_numbers(c["title"], nums):
+                d["title"] = clean_line(c["title"], 160)
+            d["summary"] = grounded_list(c.get("summary"), nums, 300) or d["summary"]
+        pre = doc_prefix(name, parts[0], 1, 1) if len(parts) == 1 else None
+        d["relations"] = ask_relations(model, sysmsg, d, pre)
+        d["relations"] += role_relations(d)
+        d["relations"] = [r for r in d["relations"] if F.relation_stated(r["relation"], body) and (
+            Run.company and (same_entity(Run.company, r["subject"]) or same_entity(Run.company, r["object"]))
+            or share_a_row(r["subject"], r["object"], body))]
+        d["topics"], project = ask_topics(model, sysmsg, d, wiki, projects(), pre)
         dest = choose_dest(f"raw/{project}", name, src)
-        plan = plan_entities(model, wiki, sysmsg, d, dest, body)
+        plan = plan_document(model, wiki, claims, sysmsg, d, dest, body)
     finally:
         model.deadline = None
 
     # 2. ... then the writes, which need no model and cannot half-fail on a slow answer.
     say("write", "writing its pages")
-    write_document_pages(wiki, src, dest, project, d, plan, truncated, len(parts))
+    write_document(wiki, claims, src, dest, project, d, plan, truncated, len(parts), touched)
     say("file", f"filing it in {os.path.dirname(dest)}")
     place(src, dest)
     wiki_events.emit("filed", file=src, to=dest)
-    log(f"filed {src} -> {dest}")
+    log(f"filed {src} -> {dest}" + (f" ({d['dropped']} figure(s) not in the document left out)" if d["dropped"] else ""))
     log_line("intake", project, d["title"] or name)
     return True
-
-
-def merge_parts(results):
-    first = results[0] if results else {}
-    m = {"title": clean_line(first.get("title") or "", 160), "doc_type": first.get("doc_type") or "other",
-         "doc_date": first.get("doc_date") or "", "summary": [], "facts": [], "entities": [],
-         "identifiers": [], "decisions": [], "open_questions": []}
-    if m["doc_type"] not in DOC_TYPES:
-        m["doc_type"] = "other"
-    seen = {}
-    for r in results:
-        if not m["doc_date"] and r.get("doc_date"):
-            m["doc_date"] = r["doc_date"]
-        m["summary"] += [clean_line(s, 300) for s in r.get("summary", []) if str(s).strip()]
-        for f in r.get("facts", []):
-            if str(f.get("fact", "")).strip():
-                m["facts"].append({"about": clean_line(f.get("about", ""), 120), "fact": clean_line(f["fact"], 300)})
-        for e in r.get("entities", []):
-            name = clean_line(e.get("name", ""), 120)
-            kind = e.get("kind") if e.get("kind") in ("company", "person", "product", "other") else "other"
-            if not norm_full(name):
-                continue
-            key = (kind, norm_full(name))
-            if key in seen:
-                role = clean_line(e.get("role", ""), 160)
-                if role and role not in seen[key]["role"]:
-                    seen[key]["role"] = clean_line(seen[key]["role"] + "; " + role, 200)
-                continue
-            seen[key] = {"name": name, "kind": kind, "role": clean_line(e.get("role", ""), 160)}
-            m["entities"].append(seen[key])
-        m["identifiers"] += [i for i in r.get("identifiers", []) if isinstance(i, dict)]
-        m["decisions"] += [clean_line(x, 300) for x in r.get("decisions", []) if str(x).strip()]
-        m["open_questions"] += [clean_line(x, 300) for x in r.get("open_questions", []) if str(x).strip()]
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", m["doc_date"] or ""):
-        m["doc_date"] = ""
-    return m
 
 
 # The label a document prints just before an identifier decides what it is; the model's
 # own label is only a hint (a small model files an SST number as a registration number).
 ID_LABELS = [
-    ("sst_no", r"\b(sst|sales\s*(and|&)\s*services?\s*tax|service\s*tax)\b"),
-    ("tin_no", r"\b(tin|tax\s*(identification|id|ref(erence)?|no|number|file))\b"),
-    ("bank_account", r"\b(account|a/c|acct?\.?\s*no|bank)\b"),
-    ("licence_no", r"\b(licen[cs]e|permit)\b"),
-    ("registration_no", r"\b(company|co\.|roc|ssm|business|registration|reg\.|incorporat\w*)\b"),
+    ("sst_no", r"\b(sst|sales\s*(and|&)\s*services?\s*tax|service\s*tax)(?!\w)"),
+    ("tin_no", r"\b(tin|tax\s*(identification|id|ref(erence)?|no|number|file))(?!\w)"),
+    ("bank_account", r"\b(account|a/c|acct?\.?\s*no|bank)(?!\w)"),
+    ("licence_no", r"\b(licen[cs]e|permit)(?!\w)"),
+    ("registration_no", r"\b(company|co\.|roc|ssm|business|registration|reg\.|incorporat\w*)(?!\w)"),
 ]
 
 
@@ -890,106 +1392,264 @@ def identifier_kind(value, body):
     for m in re.finditer(pattern, body, re.I):
         window = body[max(0, m.start() - 48):m.start()]
         window = window.split("\n")[-1] if "\n" in window[-30:] else window
+        # The label right before the number names it, back to the previous value or gap
+        # ("SST No: X  TIN: Y": Y is the TIN); within one label the order above decides
+        # ("SST Registration No" is an SST number).
+        phrase = re.split(r"\s{2,}|[;|]|\b[\w-]*\d[\w-]*\b", window)[-1]
         for kind, rx in ID_LABELS:
-            if re.search(rx, window, re.I):
+            if re.search(rx, phrase, re.I):
                 return kind
     return None
 
 
-def plan_entities(model, wiki, sysmsg, d, dest, body):
-    """For each company and person: its page (existing or new), verified identifiers, its
-    own facts, and contradictions with the existing page. Asks the model; writes nothing."""
-    plan = []
-    people = [e for e in d["entities"] if e["kind"] in ("company", "person")]
-    checks = [e["name"] for e in people if d["facts"] and wiki.find_entity(e["name"], e["kind"])]
-    for e in people:
-        rel = wiki.find_entity(e["name"], e["kind"])
-        facts = [f for f in d["facts"] if f["about"] and norm_full(f["about"]) == norm_full(e["name"])]
-        ids = {}
-        for i in d["identifiers"]:
-            if norm_full(i.get("entity", "")) != norm_full(e["name"]):
+def id_owner(value, body, said, parties, lines_above=0):
+    """Whose identifier (or address) this is. The answer's party, unless the line the
+    value is on names another company and not that one (a company number printed right
+    after the buyer's name is the buyer's). With lines_above, the lines just before it
+    count too, nearest first (a letterhead: the name, then its address)."""
+    pattern = r"\s*".join(re.escape(c) for c in re.sub(r"\s+", "", value))
+    m = re.search(pattern, body, re.I)
+    if not m:
+        return said
+    start = body.rfind("\n", 0, m.start()) + 1
+    end = body.find("\n", m.end())
+    lines = [norm_full(body[start:(end if end != -1 else len(body))])]
+    above = [l for l in body[:start].split("\n") if l.strip()][-lines_above:] if lines_above else []
+    lines += [norm_full(l) for l in reversed(above)]
+
+    def on(x, line):
+        core = split_suffix(x["p"]["name"])[0] if x else ""
+        return bool(core) and re.search(rf"(?<!\w){re.escape(core)}(?!\w)", line) is not None
+    for line in lines:
+        if said is not None and on(said, line):
+            return said
+        others = [x for x in parties if x is not said and x["p"]["kind"] == "company" and on(x, line)]
+        if others:
+            return others[0] if len(others) == 1 else said
+    return said
+
+
+def seed_claims(model, sysmsg, claims, rel, wiki):
+    """A page that has no recorded figures yet (a person wrote it, or an older engine
+    did): read its figures once, so a document that changes one of them is noticed."""
+    fm, body = split_frontmatter(read(rel))
+    found = LP.find_block(body)
+    if found:
+        body = body[:found[0]] + body[found[1]:]
+    title = wiki.pages[rel]["title"]
+    srcs = fm_list(fm, "sources") or []
+    rec_base = {"page": rel, "source": srcs[0] if srcs else rel, "source_title": "",
+                "doc_date": fm_get(fm, "updated") if re.fullmatch(r"\d{4}-\d{2}-\d{2}", fm_get(fm, "updated") or "") else "",
+                "recorded": today(), "seeded": True}
+    sentinel = dict(rec_base, attribute="_seeded", value="", norm="", qualifier="", counterparty="")
+    if not re.search(r"\d", body):
+        claims.add(sentinel)
+        return
+    say("check", f"reading the figures already on {clean_line(title, 50)}'s page")
+    q = doc_prefix(f"wiki page about {title}", body[:6000], 1, 1) + Q_SHORT.format(about=f" about {title}")
+    try:
+        a = model.ask(sysmsg, q, figures_schema([title], 20), max_tokens=1500)
+    except (ModelUnavailable, DocTimeout):
+        raise
+    except Exception as e:  # read again next time
+        log(f"figures of {rel} not read: {e}")
+        return
+    sc, nums = F.canon(body), F.numbers_in(body)
+    figures = [f for f in a.get("figures") or [] if isinstance(f, dict)]
+    if not figures:  # a short page can get an empty answer: its plainly stated terms still count
+        figures = [{"about": title, "attribute": k, "qualifier": "", "value": v} for k, v, _ in F.standing_terms(body)]
+    for f in figures:
+        if not isinstance(f, dict) or f.get("attribute") not in F.ATTRIBUTES or f.get("about") not in (title, THIS_DOC):
+            continue
+        value = clean_line(f.get("value"), 120)
+        q_ = without_value(clean_line(f.get("qualifier"), 100), value)
+        if value and F.grounded(value, sc, nums) and F.fits(f["attribute"], value):
+            claims.add(dict(rec_base, attribute=f["attribute"], qualifier="" if F.ungrounded_numbers(q_, nums) else q_,
+                            counterparty="", value=value, norm=F.norm_value(f["attribute"], value)))
+    claims.add(sentinel)
+
+
+def plan_document(model, wiki, claims, sysmsg, d, dest, body):
+    """Pages for the parties (existing or reserved), their verified identifiers, the
+    figure records, and the contradictions with what is already recorded. Asks the model
+    only to read existing pages' figures once and to check pages people wrote."""
+    plan = {"parties": [], "records": [], "conflicts": [], "notes": []}
+    own = Run.company
+    for p in d["parties"]:
+        if p["kind"] not in ("company", "person", "product"):
+            continue
+        if p["kind"] == "product":
+            p["name"] = clean_line(PRODUCT_NOISE.sub(" ", re.sub(r"\s*\([^)]*\)", "", p["name"])), 120) or p["name"]
+            rel = wiki.find_product(p["name"])
+        else:
+            rel = wiki.find_entity(p["name"], p["kind"])
+        twin = next((x for x in plan["parties"] if rel and x["rel"] == rel), None)
+        if twin:  # two names in this document for one page
+            twin["p"]["variants"] = list(dict.fromkeys(twin["p"].get("variants", []) + p.get("variants", [p["name"]])))
+            continue
+        exists = bool(rel) and os.path.exists(os.path.join(WIKI_DIR, rel))
+        if not rel:
+            folder = "products" if p["kind"] == "product" else "companies"
+            rel = wiki.unique_path(folder, slugify(p["name"]))
+            alias = clean_line(SUFFIX_ORIG_RE.sub("", p["name"]).strip(" ,."), 120) if p["kind"] == "company" else ""
+            wiki.reserve(rel, label(p["name"], 120), p["kind"], [label(alias, 120)] if alias and alias != p["name"] else [])
+        plan["parties"].append({"p": p, "rel": rel, "exists": exists, "ids": {},
+                                "own": bool(own) and p["kind"] == "company" and same_entity(own, p["name"])})
+    by_name = {}
+    for x in plan["parties"]:  # every spelling the parts used finds the party
+        for v in x["p"].get("variants", []) + [x["p"]["name"]]:
+            by_name.setdefault(norm_full(v), x)
+    for i in d["identifiers"]:
+        value = clean_line(i.get("value"), 80)
+        kind = identifier_kind(value, body)
+        x = by_name.get(norm_full(i.get("entity", "")))
+        if not kind or not x:
+            continue
+        x = id_owner(value, body, x, plan["parties"])
+        if kind == "bank_account" and BANKISH.search(x["p"]["name"]):
+            # The bank keeps the account; whose it is, the line says (or nobody can).
+            holders = [y for y in plan["parties"] if y["p"]["kind"] == "company" and not BANKISH.search(y["p"]["name"])]
+            x = id_owner(value, body, None, holders) if holders else None
+            if not x:
                 continue
-            kind = identifier_kind(i.get("value"), body)
-            if kind:
-                ids.setdefault(kind, clean_line(i["value"], 80))
-        conflicts = []
-        if rel and d["facts"]:
-            say("check", f"checking {clean_line(e['name'], 60)} against its page",
-                n=checks.index(e["name"]) + 1 if e["name"] in checks else None, of=len(checks) or None)
-            existing = split_frontmatter(read(rel))[1][:6000]
-            new = "\n".join(f"- {f['about'] + ': ' if f['about'] else ''}{f['fact']}" for f in d["facts"])
-            try:
-                c = model.ask(sysmsg, f"Existing wiki page about {e['name']}:\n<page>\n{existing}\n</page>\n\n"
-                              f"New statements from {os.path.basename(dest)}:\n{new}\n\n"
-                              "Compare them one by one. A contradiction is the page and a new statement "
-                              "giving different values for the same thing: a different price, amount, "
-                              "payment term, period, date, quantity, address, registration number, or "
-                              "person in a role (for example, a price of RM 10 on the page and RM 12 in "
-                              "the new statements). List every contradiction, quoting both sides. "
-                              "Statements that only add new information are not contradictions; return "
-                              "an empty list if there are none.",
-                              CONFLICT_SCHEMA, max_tokens=700)
-                for x in c.get("conflicts", []):
-                    conflicts.append(f"{e['name']}: the page says \"{clean_line(x.get('existing'), 160)}\"; "
-                                     f"{os.path.basename(dest)} says \"{clean_line(x.get('new'), 160)}\"")
-            except (ModelUnavailable, DocTimeout):
-                raise
-            except Exception as err:  # a failed check never blocks filing; it is logged
-                log(f"conflict check skipped for {rel}: {err}")
-        plan.append({"e": e, "rel": rel, "facts": facts, "ids": ids, "conflicts": conflicts})
+        x["ids"].setdefault(kind, value)
+    have_ids = {re.sub(r"\s+", "", v).lower() for x in plan["parties"] for v in x["ids"].values()}
+    firms = [x for x in plan["parties"] if x["p"]["kind"] == "company"]
+    for tok in id_tokens(body):
+        if any(re.sub(r"\s+", "", tok).lower() in h for h in have_ids):
+            continue
+        kind = identifier_kind(tok, body)
+        holders = [x for x in firms if not (kind == "bank_account" and BANKISH.search(x["p"]["name"]))]
+        owner = id_owner(tok, body, None, holders) if holders else None
+        if kind and owner and kind not in owner["ids"]:
+            owner["ids"][kind] = clean_line(tok, 80)
+
+    for x in plan["parties"]:
+        if x["exists"] and not wiki.pages.get(x["rel"], {}).get("engine") and not claims.seeded(x["rel"]):
+            seed_claims(model, sysmsg, claims, x["rel"], wiki)
+
+    companies = [x for x in plan["parties"] if x["p"]["kind"] == "company"]
+    base = {"source": dest, "source_title": d["title"] or os.path.basename(dest), "doc_date": d["doc_date"],
+            "recorded": today(), "summary": None}
+    bilateral = len(companies) == 2 and companies[0]["rel"] != companies[1]["rel"]
+    for f in d["figures"]:
+        x = by_name.get(norm_full(f["about"]))
+        if f["attribute"] not in F.STANDING:
+            continue  # a one-off amount, date or reference: on the document's summary page
+        if not x and not (bilateral and f["attribute"] in F.RELATIONAL):
+            continue  # the document's own figure: on its summary page only
+        if not x:
+            x = companies[0]  # a term of an agreement between two companies holds for both
+        if identifier_kind(f["value"], body):
+            continue  # a registration, tax or account number: the Info card holds it
+        if f["attribute"] == "address" and x["p"]["kind"] == "company":
+            x = id_owner(f["value"], body, x, plan["parties"], lines_above=2)
+        rec = dict(base, page=x["rel"], attribute=f["attribute"], qualifier=f["qualifier"], counterparty="",
+                   value=f["value"], norm=F.norm_value(f["attribute"], f["value"]))
+        recs = [rec]
+        if f["attribute"] in F.RELATIONAL and bilateral and x in companies:
+            other = companies[1] if x is companies[0] else companies[0]
+            rec["counterparty"] = other["rel"]
+            recs.append(dict(rec, page=other["rel"], counterparty=x["rel"], mirror=True))
+        flagged = False
+        for r in recs:
+            old = claims.conflict(r)
+            if old:
+                if not flagged:  # the same term on both parties' pages is one question
+                    plan["conflicts"].append((old, r))
+                flagged = True
+                r["conflicted"] = True
+            plan["records"].append(r)
+
+    # Pages people wrote can hold facts that are not figures; the model compares those.
+    for x in plan["parties"]:
+        if not x["exists"] or wiki.pages.get(x["rel"], {}).get("engine"):
+            continue
+        nm = x["p"]["name"]
+        stmts = [f"{nm}: {x['p']['role']}"] if x["p"]["role"] else []
+        stmts += [s for s in d["summary"] if norm_full(nm.split()[0]) in norm_full(s) and not re.search(r"\d", s)]
+        if not stmts:
+            continue
+        existing = split_frontmatter(read(x["rel"]))[1]
+        found = LP.find_block(existing)
+        if found:
+            existing = existing[:found[0]] + existing[found[1]:]
+        say("check", f"checking {clean_line(nm, 60)} against its page")
+        c = ask_safe(model, sysmsg, f"Existing wiki page about {nm}:\n<page>\n{existing[:6000]}\n</page>\n\n"
+                     f"New statements from {os.path.basename(dest)}:\n" + "\n".join(f"- {s}" for s in stmts) + "\n\n"
+                     "Compare them one by one. A contradiction is the page and a new statement giving different "
+                     "values for the same thing: a different person in a role, a different address, a different "
+                     "status. Statements that only add new information are not contradictions; return an empty "
+                     "list if there are none.", CONFLICT_SCHEMA, 700, f"check of {x['rel']}")
+        for k in c.get("conflicts") or []:
+            plan["notes"].append((x, f"{nm}: the page says \"{clean_line(k.get('existing'), 160)}\"; "
+                                     f"{os.path.basename(dest)} says \"{clean_line(k.get('new'), 160)}\""))
     return plan
 
 
-def write_document_pages(wiki, src, dest, project, d, plan, truncated, n_parts):
+def write_document(wiki, claims, src, dest, project, d, plan, truncated, n_parts, touched):
     title = d["title"] or os.path.splitext(os.path.basename(src))[0]
     slug = slugify(os.path.splitext(os.path.basename(dest))[0])
     summary_rel = wiki.unique_path("sources", slug, source=dest)
     created = summary_rel not in wiki.pages
+    wiki.pages.setdefault(summary_rel, {"title": label(title, 160), "aliases": [], "tags": [d["doc_type"]], "engine": True})
+    rel_of = {norm_full(v): x["rel"] for x in plan["parties"] for v in x["p"].get("variants", []) + [x["p"]["name"]]}
+
+    # Topic pages and decision pages this document creates.
+    for t in d["topics"]:
+        if not t["rel"]:
+            t["rel"] = wiki.unique_path(t["section"], slugify(t["title"]))
+            wiki.reserve(t["rel"], label(t["title"], 80), "topic")
+    decisions = []
+    for dc in d["decisions"]:
+        date = dc["date"] or d["doc_date"] or today()
+        rel = wiki.unique_path("decisions", f"{date}-{slugify(dc['title'], 50)}", source=dest)
+        while rel in [x["rel"] for x in decisions]:
+            rel = rel[:-3] + "-2.md" if not re.search(r"-\d+\.md$", rel) else re.sub(
+                r"-(\d+)\.md$", lambda m: f"-{int(m.group(1)) + 1}.md", rel)
+        wiki.reserve(rel, label(dc["title"], 90), "decision")
+        decisions.append(dict(dc, rel=rel, date=date))
+
+    # Records: figures, the parties' roles, relationships, topic points.
+    for r in plan["records"]:
+        r["summary"] = summary_rel
+        r["source_title"] = label(title, 120)
+        claims.add(r)
+    base = {"source": dest, "source_title": label(title, 120), "doc_date": d["doc_date"], "recorded": today(),
+            "summary": summary_rel, "qualifier": "", "counterparty": "", "norm": ""}
+    for x in plan["parties"]:
+        claims.add(dict(base, page=x["rel"], attribute="_doc", value=x["p"]["role"]))
+    rels = []
+    for r in d["relations"]:
+        a, b = rel_of.get(norm_full(r["subject"])), rel_of.get(norm_full(r["object"]))
+        relation = r["relation"]
+        if relation in ("customer_of", "tenant_of"):  # one way of saying each: the supplier's, the landlord's
+            relation, a, b = {"customer_of": "supplier_of", "tenant_of": "landlord_of"}[relation], b, a
+        if relation == "bank_of" and a and b and not BANKISH.search(r["subject"]) and BANKISH.search(r["object"]):
+            a, b = b, a
+        if a and b and a != b and (a, relation, b) not in rels:
+            rels.append((a, relation, b))
+            claims.add(dict(base, page=a, attribute="_rel", qualifier=relation, counterparty=b, value=""))
+    for t in d["topics"]:
+        for pt in t["points"]:
+            claims.add(dict(base, page=t["rel"], attribute="_point", value=pt))
+        if not t["points"]:
+            claims.add(dict(base, page=t["rel"], attribute="_point", value=d["summary"][0] if d["summary"] else title))
+    claims.save()
 
     # The summary page first, so every link to it resolves even if a later step fails.
-    ent_rels = []
-    for p in plan:
-        if p["rel"]:
-            ent_rels.append(p["rel"])
-        else:
-            p["rel"] = wiki.unique_path("companies", slugify(p["e"]["name"]))
-            ent_rels.append(p["rel"])
-            wiki.pages.setdefault(p["rel"], {"title": p["e"]["name"], "aliases": [], "tags": [p["e"]["kind"]]})
-    conflicts = [c for p in plan for c in p["conflicts"]]
-
-    lines = ["---", f"title: {yq(label(title, 160))}", "type: summary", f"tags: [{yq(d['doc_type'])}]",
-             f"sources: [{yq(dest)}]",
-             "status: needs-review" if (truncated or conflicts) else "status: draft",
-             f"updated: {today()}", f"project: {yq(project)}"]
-    if d["doc_date"]:
-        lines.append(f"doc_date: {yq(d['doc_date'])}")
-    lines += ["engine: local", "---", ""]
-    lines.append(f"> Summary of {raw_link(dest)} written by the local model on this Mac. "
-                 "Check figures against the original before relying on them.")
-    lines.append("")
-    if d["summary"]:
-        lines += ["## Summary", ""] + [f"- {esc(s)}" for s in d["summary"]] + [""]
-    if d["facts"]:
-        lines += ["## Key facts", ""]
-        lines += [f"- **{esc(f['about'], 120)}:** {esc(f['fact'])}" if f["about"] else f"- {esc(f['fact'])}"
-                  for f in d["facts"]]
-        lines.append("")
-    if plan:
-        lines += ["## Companies and people", ""]
-        lines += [f"- {wiki.link(p['rel'], p['e']['name'])}" + (f" — {esc(p['e']['role'], 160)}" if p["e"]["role"] else "")
-                  for p in plan]
-        lines.append("")
-    if d["decisions"]:
-        lines += ["## Decisions", ""] + [f"- {esc(x)}" for x in d["decisions"]] + [""]
-    if d["open_questions"]:
-        lines += ["## Open questions", ""] + [f"- {esc(x)}" for x in d["open_questions"]] + [""]
-    if truncated:
-        lines += [f"_Only the first {n_parts} parts of this long document were read._", ""]
-    write(summary_rel, "\n".join(lines))
+    write(summary_rel, summary_page(wiki, d, dest, project, title, plan, rels, decisions, truncated, n_parts))
     page_event(summary_rel, created, wiki)
 
-    for p in plan:
-        write_entity(wiki, p, d, dest, summary_rel, title)
+    conflicted = {r["page"] for r in plan["records"] if r.get("conflicted")} | {x["rel"] for x, _ in plan["notes"]}
+    for x in plan["parties"]:
+        write_entity(wiki, claims, x, dest, summary_rel, title, x["rel"] in conflicted)
+        touched.setdefault(x["rel"], "entity")
+    for t in d["topics"]:
+        write_topic(wiki, claims, t["rel"], t["title"], dest)
+        touched.setdefault(t["rel"], "topic")
+    for dc in decisions:
+        write_decision(wiki, dc, dest, summary_rel, title, plan)
 
     proj_rel = f"wiki/projects/{project}.md"
     if proj_rel not in wiki.pages or not os.path.exists(os.path.join(WIKI_DIR, proj_rel)):
@@ -1004,52 +1664,232 @@ def write_document_pages(wiki, src, dest, project, d, plan, truncated, n_parts):
         page_event(proj_rel, False, wiki)
 
     index_add(wiki, summary_rel, "Sources", (d["summary"] or [title])[0])
-    for p in plan:
-        index_add(wiki, p["rel"], "Companies and people", p["e"]["role"] or p["e"]["kind"])
+    for x in plan["parties"]:
+        index_add(wiki, x["rel"], "Products" if x["p"]["kind"] == "product" else "Companies and people",
+                  x["p"]["role"] or x["p"]["kind"])
+    for t in d["topics"]:
+        index_add(wiki, t["rel"], SECTIONS[t["rel"].split("/")[1]], (t["points"] or [t["title"]])[0])
+    for dc in decisions:
+        index_add(wiki, dc["rel"], "Decisions", dc["decision"])
 
-    if conflicts:
-        review(project, summary_rel, "a new document disagrees with an existing page", conflicts)
+    for old, new in plan["conflicts"]:
+        what = F.label_of(new["attribute"]).lower() + (f" ({new['qualifier']})" if new.get("qualifier") else "")
+        page_title = wiki.pages.get(new["page"], {}).get("title") or new["page"]
+        dated = lambda r: f"{source_name(r)}, {r['doc_date']}" if r.get("doc_date") else f"{source_name(r)}, undated"  # noqa: E731
+        if F.Claims.order(new) >= F.Claims.order(old):
+            outcome = f"The page now shows {new['value']}, from the later document, with {old['value']} as the previous value."
+        else:
+            outcome = (f"The page still shows {old['value']}: {source_name(new)} is "
+                       + ("older." if new.get("doc_date") else "undated."))
+        review(project, new["page"], "a new document disagrees with an existing page", [
+            f"{page_title} — {what}: {old['value']} ({dated(old)}) against {new['value']} ({dated(new)}).",
+            outcome + " Confirm which is right."])
+    flagged = {r["page"] for _, r in plan["conflicts"]}
+    for x, line in plan["notes"]:
+        if x["rel"] not in flagged:  # a figure already flagged on this page says enough
+            review(project, x["rel"], "a new document disagrees with an existing page", [line])
     if truncated:
         review(project, summary_rel, "long document only partly read",
                [f"{os.path.basename(dest)} has more than {MAX_PARTS} parts; only the first were read."])
 
 
-def write_entity(wiki, p, d, dest, summary_rel, summary_title):
-    e, rel = p["e"], p["rel"]
-    bullet = f"- {today()} — {esc(e['role'] or 'mentioned', 160)} ({wiki.link(summary_rel, summary_title)})"
-    facts = [f"- {esc(f['fact'])} ({wiki.link(summary_rel, 'source')})" for f in p["facts"]]
+BANKISH = re.compile(r"\bbank\b|\bbanking\b|maybank|\bcimb\b|\brhb\b|ambank|\bocbc\b|\bhsbc\b|\buob\b|\baffin\b|\bbsn\b", re.I)
+
+
+def source_name(r):
+    return r.get("source_title") or os.path.basename(r.get("source") or "") or "a page"
+
+
+def link_of(wiki):
+    def f(rel, text=None):
+        return wiki.link(rel, text) if rel in wiki.pages else esc(text or rel)
+    return f
+
+
+def summary_page(wiki, d, dest, project, title, plan, rels, decisions, truncated, n_parts):
+    link = link_of(wiki)
+    lines = ["---", f"title: {yq(label(title, 160))}", "type: summary", f"tags: [{yq(d['doc_type'])}]",
+             f"sources: [{yq(dest)}]",
+             "status: needs-review" if (truncated or plan["conflicts"] or plan["notes"]) else "status: draft",
+             f"updated: {today()}", f"project: {yq(project)}"]
+    if d["doc_date"]:
+        lines.append(f"doc_date: {yq(d['doc_date'])}")
+    lines += ["engine: local", "---", ""]
+    lines.append(f"> Summary of {raw_link(dest)} written by the model on this Mac. Every figure on this page "
+                 "was found in the document; check the original before relying on one.")
+    lines.append("")
+    if d["summary"]:
+        lines += ["## Summary", ""] + [f"- {esc(s)}" for s in d["summary"]] + [""]
+    rel_of = {norm_full(v): x["rel"] for x in plan["parties"] for v in x["p"].get("variants", []) + [x["p"]["name"]]}
+    if d["figures"]:
+        lines += ["## Key facts", "", "| Fact | About | Value |", "|---|---|---|"]
+        for f in d["figures"][:60]:
+            about = rel_of.get(norm_full(f["about"]))
+            fact = F.label_of(f["attribute"]) + (f" ({f['qualifier']})" if f["qualifier"] else "")
+            lines.append(f"| {esc(fact, 160)} | {LP.cell(link(about)) if about else '—'} | {esc(f['value'], 160)} |")
+        lines.append("")
+    ids = [(x, k, v) for x in plan["parties"] for k, v in x["ids"].items()]
+    if ids:
+        lines += ["## Identifiers", ""] + [f"- {link(x['rel'])}: {k.replace('_', ' ')} {esc(v, 80)}" for x, k, v in ids] + [""]
+    if plan["parties"] or any(p["kind"] in ("place", "other") for p in d["parties"]):
+        lines += ["## Parties", ""]
+        lines += [f"- {link(x['rel'])}" + (f" — {esc(x['p']['role'], 160)}" if x["p"]["role"] else "") for x in plan["parties"]]
+        lines += [f"- {esc(p['name'], 120)} ({p['kind']})" + (f" — {esc(p['role'], 160)}" if p["role"] else "")
+                  for p in d["parties"] if p["kind"] in ("place", "other")]
+        lines.append("")
+    if rels:
+        lines += ["## Relationships", ""]
+        lines += [f"- {LP.relation_line(link(a), r, link(b))}" for a, r, b in rels]
+        lines.append("")
+    if d["obligations"]:
+        lines += ["## Obligations and deadlines", ""] + [f"- {esc(x)}" for x in d["obligations"]] + [""]
+    if decisions:
+        lines += ["## Decisions", ""] + [f"- {link(dc['rel'])} — {esc(dc['decision'])}" for dc in decisions] + [""]
+    if d["open_questions"]:
+        lines += ["## Open questions", ""] + [f"- {esc(x)}" for x in d["open_questions"]] + [""]
+    if d["topics"]:
+        lines += ["## Topics", ""] + [f"- {link(t['rel'])}" for t in d["topics"]] + [""]
+    if truncated:
+        lines += [f"_Only the first {n_parts} parts of this long document were read._", ""]
+    return "\n".join(lines)
+
+
+def entity_overview_fallback(wiki, rel, claims):
+    """A first overview from what is recorded, until the model writes one."""
+    p = wiki.pages.get(rel, {})
+    docs = claims.records("_doc", rel)
+    roles = list(dict.fromkeys(r["value"] for r in docs if r.get("value")))[:3]
+    kind = next((t for t in p.get("tags", []) if t in ("company", "person", "product")), "")
+    text_ = f"{p.get('title', '')}" + (f" ({kind})" if kind else "")
+    if roles:
+        text_ += ": " + "; ".join(roles)
+    text_ += f". Named in {len({r.get('source') for r in docs})} document(s) so far; the facts and documents are below."
+    return esc(text_, 600)
+
+
+def entity_block(wiki, claims, rel, overview=None):
+    link = link_of(wiki)
+    title_of = lambda r: wiki.pages.get(r, {}).get("title") or r  # noqa: E731
+    body = split_frontmatter(read(rel))[1] if os.path.exists(os.path.join(WIKI_DIR, rel)) else ""
+    ov = overview or LP.block_section(body, "Overview") or entity_overview_fallback(wiki, rel, claims)
+    return LP.entity_block(ov, LP.facts_table(claims.facts(rel), title_of, link),
+                           LP.related_lines(rel, claims.records("_rel", rel, other=True), link),
+                           LP.documents_lines(claims.records("_doc", rel), link))
+
+
+def write_entity(wiki, claims, x, dest, summary_rel, summary_title, conflicted):
+    e, rel = x["p"], x["rel"]
     path = os.path.join(WIKI_DIR, rel)
     if not os.path.exists(path):
+        tags = [e["kind"]] + (["own-company"] if x.get("own") else [])
         lines = ["---", f"title: {yq(label(e['name'], 120))}", "type: entity",
-                 f"tags: [{yq(e['kind'])}]", f"sources: [{yq(dest)}]", "status: draft",
-                 f"updated: {today()}"]
-        if e["kind"] == "company":
-            alias = clean_line(SUFFIX_ORIG_RE.sub("", e["name"]).strip(" ,."), 120)
-            if alias and alias != e["name"]:
-                lines.append(f"aliases: [{yq(label(alias, 120))}]")
-        if p["ids"]:
+                 f"tags: [{', '.join(yq(t) for t in tags)}]", f"sources: [{yq(dest)}]",
+                 "status: needs-review" if conflicted else "status: draft", f"updated: {today()}"]
+        aliases = wiki.pages.get(rel, {}).get("aliases") or []
+        if aliases:
+            lines.append(f"aliases: [{', '.join(yq(a) for a in aliases)}]")
+        if x["ids"]:
             lines.append("facts:")
-            lines += [f"  {k}: {yq(v)}" for k, v in p["ids"].items()]
-        lines += ["---", "", f"{esc(e['name'], 120)} ({e['kind']}).", ""]
-        if facts:
-            lines += ["## Facts", ""] + facts + [""]
-        lines += ["## From sources", "", bullet, ""]
+            lines += [f"  {k}: {yq(v)}" for k, v in x["ids"].items()]
+        lines += ["engine: local", "---", "", LP.render_block(entity_block(wiki, claims, rel)), ""]
         write(rel, "\n".join(lines))
         page_event(rel, True, wiki)
         return
-    if wiki.has_link(rel, summary_rel):
-        return  # this document was already recorded here (a retry)
-    if facts:
-        append_under(rel, "Facts", facts)
-    append_under(rel, "From sources", [bullet])
     fm, body = split_frontmatter(read(rel))
-    if p["ids"] and fm and not re.search(r"^facts:", fm, re.M):
-        # Verified identifiers fill an empty Info card; an existing card is never changed.
-        fm = fm.rstrip("\n") + "\nfacts:\n" + "".join(f"  {k}: {yq(v)}\n" for k, v in p["ids"].items())
-        write(rel, "---\n" + fm.strip("\n") + "\n---\n" + body)
-    # A page a new document contradicts is flagged too, not only the new summary.
-    touch_page(rel, add_source=dest, status="needs-review" if p["conflicts"] else None)
+    new_body, outcome = LP.put_block(body, entity_block(wiki, claims, rel), "top")
+    if outcome == "edited":
+        # A person edited the engine's block: it stays as they left it, and this document
+        # is noted below it instead.
+        if not wiki.has_link(rel, summary_rel):
+            append_under(rel, "From sources", [f"- {today()} — {esc(e['role'] or 'mentioned', 160)} "
+                                               f"({wiki.link(summary_rel, summary_title)})"])
+            fm, new_body = split_frontmatter(read(rel))
+        review("general", rel, "the engine's section was edited by hand", [
+            f"{wiki.pages[rel]['title']}: its overview and facts were edited by hand, so the wiki no longer updates "
+            "them. Remove the two wiki-engine marker lines to let it update them again."])
+    if fm:
+        fm = merge_ids(fm, x["ids"], rel, wiki, dest)
+        write(rel, "---\n" + fm.strip("\n") + "\n---\n" + new_body)
+    else:
+        write(rel, new_body)
+    touch_page(rel, add_source=dest, status="needs-review" if conflicted else None)
     page_event(rel, False, wiki)
+
+
+def merge_ids(fm, ids, rel, wiki, dest):
+    """Verified identifiers added to a page's facts: map (its Info card). A key the card
+    already has is never changed; a different value goes to the review queue. A facts:
+    entry in a shape this does not write (a flow map, a comment) is left alone."""
+    if not ids:
+        return fm
+    blk = _key_block(fm, "facts")
+    if not blk:
+        return fm.rstrip("\n") + "\nfacts:\n" + "".join(f"  {k}: {yq(v)}\n" for k, v in ids.items())
+    start, end, first = blk
+    if re.sub(r"\s*#.*$", "", first) not in ("", "{}"):
+        log(f"{rel}: its facts: entry is not a plain list of keys; identifiers left out")
+        return fm
+    lines = [l for l in fm[start:end].split("\n")[1:] if l.strip()]
+    have = {}
+    for line in lines:
+        m = re.match(r"^\s+([\w-]+):\s*(.*)$", line)
+        if m:
+            have[m.group(1)] = fm_get("v: " + m.group(2), "v")
+    for k, v in ids.items():
+        if k in have and re.sub(r"\s+", "", have[k]).lower() != re.sub(r"\s+", "", v).lower():
+            review("general", rel, "an identifier differs", [
+                f"{wiki.pages[rel]['title']}: the Info card says {k.replace('_', ' ')} {have[k]}; "
+                f"{os.path.basename(dest)} says {v}. The card was left as it is."])
+    add = [f"  {k}: {yq(v)}" for k, v in ids.items() if k not in have]
+    if not add:
+        return fm
+    return fm[:start] + "\n".join(["facts:"] + lines + add) + fm[end:]
+
+
+def topic_block(wiki, claims, rel, overview=None):
+    engine_page = wiki.pages.get(rel, {}).get("engine", True)
+    body = split_frontmatter(read(rel))[1] if os.path.exists(os.path.join(WIKI_DIR, rel)) else ""
+    points = claims.records("_point", rel)
+    fallback = esc("; ".join(dict.fromkeys(r["value"] for r in points))[:400] or wiki.pages.get(rel, {}).get("title"), 600)
+    ov = overview or LP.block_section(body, "Overview") or fallback
+    return LP.topic_block(ov, points, link_of(wiki), with_overview=engine_page)
+
+
+def write_topic(wiki, claims, rel, title, dest):
+    path = os.path.join(WIKI_DIR, rel)
+    if not os.path.exists(path):
+        lines = ["---", f"title: {yq(label(title, 80))}", "type: concept", "tags: [topic]",
+                 f"sources: [{yq(dest)}]", "status: draft", f"updated: {today()}", "engine: local", "---", "",
+                 LP.render_block(topic_block(wiki, claims, rel)), ""]
+        write(rel, "\n".join(lines))
+        page_event(rel, True, wiki)
+        return
+    fm, body = split_frontmatter(read(rel))
+    engine_page = wiki.pages.get(rel, {}).get("engine")
+    new_body, outcome = LP.put_block(body, topic_block(wiki, claims, rel), "top" if engine_page else "end")
+    if outcome == "written":
+        write(rel, ("---\n" + fm.strip("\n") + "\n---\n" if fm else "") + new_body)
+    touch_page(rel, add_source=dest)
+    page_event(rel, False, wiki)
+
+
+def write_decision(wiki, dc, dest, summary_rel, summary_title, plan):
+    rel = dc["rel"]
+    created = not os.path.exists(os.path.join(WIKI_DIR, rel))
+    names = [(x["p"]["name"], wiki.link(x["rel"])) for x in plan["parties"]]
+    content = "\n".join([f"**Decided {dc['date']}:** {LP.linked(dc['decision'], names)}", "",
+                         f"Recorded in {wiki.link(summary_rel, summary_title)}.", ""])
+    if created:
+        write(rel, "\n".join(["---", f"title: {yq(label(dc['title'], 90))}", "type: decision", "tags: [decision]",
+                              f"sources: [{yq(dest)}]", "status: active", f"updated: {today()}",
+                              f"decided: {yq(dc['date'])}", "engine: local", "---", "", LP.render_block(content), ""]))
+    else:
+        fm, body = split_frontmatter(read(rel))
+        new_body, outcome = LP.put_block(body, content, "top")
+        if outcome != "written":
+            return
+        write(rel, ("---\n" + fm.strip("\n") + "\n---\n" if fm else "") + new_body)
+    page_event(rel, created, wiki)
 
 
 # ==================================================================== packets ====
@@ -1109,7 +1949,7 @@ def is_empty(v):
     return str(v).strip().lower().strip(".") in ("", "none", "n/a", "na", "-", "nil", "no")
 
 
-def process_packet(model, wiki, src, sysmsg):
+def process_packet(model, wiki, claims, src, sysmsg, touched):
     Run.current = src
     wiki_events.emit("read", file=src)
     log(f"applying {src}")
@@ -1119,27 +1959,40 @@ def process_packet(model, wiki, src, sysmsg):
         text_ = re.sub(r"^(<<<<<<<|=======|>>>>>>>).*$", "", text_, flags=re.M)
     packets = parse_packets(text_) or ([note_as_packet(text_, os.path.basename(src))] if text_.strip() else [])
     archived = choose_dest("archive/inbox", os.path.basename(src), src)
-    model.deadline = time.time() + DOC_BUDGET_SECONDS
+    model.deadline = time.time() + Run.doc_budget
     try:
-        planned = [(p, plan_packet(model, wiki, p, sysmsg)) for p in packets]
+        planned = [(p, plan_packet(model, wiki, claims, p, sysmsg, archived)) for p in packets]
     finally:
         model.deadline = None
     say("write", "writing the update into the wiki")
-    for p, (targets, unresolved) in planned:
-        apply_packet(wiki, p, archived, targets, unresolved)
+    for p, plan in planned:
+        apply_packet(wiki, claims, p, archived, plan, touched)
     say("file", "archiving it")
     place(src, archived)
     wiki_events.emit("applied", file=src, to=archived)
     return True
 
 
-def plan_packet(model, wiki, p, sysmsg):
+def packet_text(p):
+    return "\n".join([p["title"], p["Summary"]] + p["Details"] + [p["Supersedes"]])
+
+
+def plan_packet(model, wiki, claims, p, sysmsg, archived):
     """The existing pages an update names: matched by code, and by the model only for the
-    names code cannot match, choosing from candidates it is shown."""
-    targets, unresolved = [], []
+    names code cannot match, choosing from candidates it is shown. A name with a section
+    ('how-it-runs/stock-count') that has no page yet becomes a new topic page. Then the
+    update's figures, for the claims of the pages it names."""
+    targets, unresolved, create = [], [], []
     for t in p["Affects pages"]:
         r = wiki.resolve(t)
-        (targets.append(r) if r else unresolved.append(clean_line(t, 120)))
+        if r:
+            targets.append(r)
+            continue
+        m = re.match(r"^\s*(?:wiki/)?(finance-legal|how-it-runs)/([\w-]+?)(?:\.md)?\s*$", t.strip().strip("`*[]"))
+        if m:
+            create.append((f"wiki/{m.group(1)}/{slugify(m.group(2))}.md", m.group(2).replace("-", " ").capitalize()))
+        else:
+            unresolved.append(clean_line(t, 120))
     if unresolved:
         words = set(norm_full(" ".join(unresolved) + " " + p["title"]).split())
         cands = sorted((x for x in wiki.pages if not x.startswith(("wiki/sources/", "wiki/updates/"))),
@@ -1149,67 +2002,291 @@ def plan_packet(model, wiki, p, sysmsg):
         if cands:
             say("ask", "matching the pages it names")
             listing = "\n".join(f"- {c} ({clean_line(wiki.pages[c]['title'], 80)})" for c in cands)
-            try:
-                ans = model.ask(sysmsg, "An update says it affects these pages: " + "; ".join(unresolved)
-                                + f"\nUpdate: {p['title']}. {clean_line(p['Summary'], 400)}\n\n"
-                                "Existing pages:\n" + listing + "\n\nWhich of the existing pages are meant? "
-                                "Choose only clear matches; return an empty list if none fits.",
-                                obj({"pages": S("array", items=S("string", enum=cands), maxItems=8)}),
-                                max_tokens=400)
-                targets += ans.get("pages", [])
-            except (ModelUnavailable, DocTimeout):
-                raise
-            except Exception as err:
-                log(f"page matching skipped: {err}")
+            ans = ask_safe(model, sysmsg, "An update says it affects these pages: " + "; ".join(unresolved)
+                           + f"\nUpdate: {p['title']}. {clean_line(p['Summary'], 400)}\n\n"
+                           "Existing pages:\n" + listing + "\n\nWhich of the existing pages are meant? "
+                           "Choose only clear matches; return an empty list if none fits.",
+                           obj({"pages": S("array", items=S("string", enum=cands), maxItems=8)}), 400,
+                           "page matching")
+            targets += ans.get("pages") or []
     targets = [t for i, t in enumerate(targets) if t in wiki.pages and t not in targets[:i]]
-    return targets, unresolved
+    create = [c for i, c in enumerate(create) if c[0] not in wiki.pages and c not in create[:i]]
+
+    # The update's figures, for the pages it names that hold claims (a company, a person,
+    # a product or a topic).
+    records, conflicts = [], []
+    body = packet_text(p)
+    pages = [t for t in targets if t.startswith(("wiki/companies/", "wiki/products/", "wiki/finance-legal/",
+                                                 "wiki/how-it-runs/"))]
+    if pages and re.search(r"\d", body):
+        names = [wiki.pages[t]["title"] for t in pages]
+        for t in pages:
+            if not claims.seeded(t) and not wiki.pages[t].get("engine"):
+                seed_claims(model, sysmsg, claims, t, wiki)
+        say("ask", "finding the figures it changes")
+        q = ("This is an update the business owner wrote.\n<document>\n" + body[:8000] + "\n</document>\n\n"
+             + Q_SHORT.format(about=" about " + "; ".join(names)))
+        a = ask_safe(model, sysmsg, q, figures_schema(names, 15), 1500, "figures of the update")
+        sc, nums = F.canon(body), F.numbers_in(body)
+        by_title = {norm_full(wiki.pages[t]["title"]): t for t in pages}
+        for f in a.get("figures") or []:
+            if not isinstance(f, dict) or f.get("attribute") not in F.ATTRIBUTES:
+                continue
+            page = by_title.get(norm_full(f.get("about")))
+            value = clean_line(f.get("value"), 120)
+            if not page or not value or not F.grounded(value, sc, nums) or not F.fits(f["attribute"], value):
+                continue
+            q_ = clean_line(f.get("qualifier"), 100)
+            rec = {"page": page, "attribute": f["attribute"], "qualifier": "" if F.ungrounded_numbers(q_, nums) else q_,
+                   "counterparty": "", "value": value, "norm": F.norm_value(f["attribute"], value),
+                   "source": archived, "source_title": label(p["title"], 120), "doc_date": p["date"],
+                   "recorded": today(), "summary": None, "supersedes": not is_empty(p["Supersedes"])}
+            old = claims.conflict(rec)
+            if old:
+                conflicts.append((old, rec))
+            records.append(rec)
+    return {"targets": targets, "unresolved": unresolved, "create": create, "records": records,
+            "conflicts": conflicts}
 
 
-def apply_packet(wiki, p, archived, targets, unresolved):
+def apply_packet(wiki, claims, p, archived, plan, touched):
+    targets, unresolved = plan["targets"], plan["unresolved"]
     kind = (str(p["Type"]).split("|")[0].strip().lower() or "fact")
     folder = "decisions" if kind == "decision" else "updates"
     slug = f"{p['date']}-{slugify(p['title'], 50)}"
     rel = wiki.unique_path(folder, slug, source=archived)
     created = rel not in wiki.pages
     targets = [t for t in targets if t != rel]
+    wiki.reserve(rel, label(p["title"], 160), kind)
+    for t_rel, t_title in plan["create"]:
+        wiki.reserve(t_rel, label(t_title, 80), "topic")
+    new_topics = [t for t, _ in plan["create"]]
 
+    # Records: the figures (on their pages), the update on every page it names.
+    for r in plan["records"]:
+        r["summary"] = rel
+        claims.add(r)
+    base = {"source": archived, "source_title": label(p["title"], 120), "doc_date": p["date"], "recorded": today(),
+            "summary": rel, "qualifier": "", "counterparty": "", "norm": ""}
+    point = clean_line(p["Summary"] or p["title"], 300)
+    for t in targets + new_topics:
+        if t.startswith(("wiki/finance-legal/", "wiki/how-it-runs/")):
+            claims.add(dict(base, page=t, attribute="_point", value=point))
+            for x in p["Details"][:6]:
+                claims.add(dict(base, page=t, attribute="_point", value=clean_line(x, 300)))
+        elif t.startswith(("wiki/companies/", "wiki/products/")):
+            claims.add(dict(base, page=t, attribute="_doc", value=""))
+    claims.save()
+
+    superseded = [(o, r) for o, r in plan["conflicts"] if r.get("supersedes")]
     lines = ["---", f"title: {yq(label(p['title'], 160))}", f"type: {'decision' if folder == 'decisions' else 'summary'}",
              f"tags: [{yq(slugify(kind, 30))}]", f"sources: [{yq(archived)}]",
-             "status: needs-review" if not is_empty(p["Supersedes"]) else "status: active",
+             "status: needs-review" if (not is_empty(p["Supersedes"]) and not superseded) else "status: active",
              f"updated: {today()}", f"project: {yq(p['project'])}", "engine: local", "---", ""]
     if p["Summary"]:
         lines += [owner_text(p["Summary"]), ""]
     if p["Details"]:
         lines += ["## Details", ""] + [f"- {owner_text(x)}" for x in p["Details"]] + [""]
-    if targets:
-        lines += ["## Affects", ""] + [f"- {wiki.link(t)}" for t in targets] + [""]
+    if targets or new_topics:
+        lines += ["## Affects", ""] + [f"- {wiki.link(t)}" for t in targets + new_topics] + [""]
     if not is_empty(p["Supersedes"]):
         lines += ["## Supersedes", "", owner_text(p["Supersedes"]), ""]
+        lines += [f"- {esc(wiki.pages.get(r['page'], {}).get('title', r['page']), 120)}: "
+                  f"{esc(F.label_of(r['attribute']).lower())} {esc(o['value'], 80)} → {esc(r['value'], 80)}"
+                  for o, r in superseded] + ([""] if superseded else [])
     if not is_empty(p["Open questions"]):
         lines += ["## Open questions", "", owner_text(p["Open questions"]), ""]
     lines += [f"_From the Update Packet {raw_link(archived)}, dated {p['date']}._", ""]
     write(rel, "\n".join(lines))
     page_event(rel, created, wiki)
 
+    for t_rel, t_title in plan["create"]:
+        write_topic(wiki, claims, t_rel, t_title, archived)
+        touched.setdefault(t_rel, "topic")
+        index_add(wiki, t_rel, SECTIONS[t_rel.split("/")[1]], point)
     entry = f"- **{p['date']}** — {esc(p['Summary'] or p['title'], 300)} ({wiki.link(rel, 'details')})"
     for t in targets:
+        if t.startswith(("wiki/companies/", "wiki/products/")):
+            touched.setdefault(t, "entity")
+        elif t.startswith(("wiki/finance-legal/", "wiki/how-it-runs/")):
+            write_topic(wiki, claims, t, wiki.pages[t]["title"], archived)
+            touched.setdefault(t, "topic")
         if wiki.has_link(t, rel):
             continue
         append_under(t, "Updates", [entry])
-        touch_page(t, add_source=archived)
+        touch_page(t, add_source=archived, status="needs-review" if any(
+            r["page"] == t and not r.get("supersedes") for _, r in plan["conflicts"]) else None)
         page_event(t, False, wiki)
 
     index_add(wiki, rel, "Decisions" if folder == "decisions" else "Updates", p["Summary"] or p["title"])
     log_line("ingest", p["project"], p["title"])
-    if not is_empty(p["Supersedes"]):
+    for o, r in plan["conflicts"]:
+        if r.get("supersedes"):
+            continue
+        page_title = wiki.pages.get(r["page"], {}).get("title") or r["page"]
+        review(p["project"], r["page"], "an update disagrees with an existing page", [
+            f"{page_title} — {F.label_of(r['attribute']).lower()}: {o['value']} ({source_name(o)}) against "
+            f"{r['value']} ({p['title']}, {p['date']}).",
+            "The update does not say it supersedes the earlier value. Confirm which is right."])
+    if not is_empty(p["Supersedes"]) and not superseded:
         review(p["project"], rel, "an update supersedes an earlier claim", [
             f"{p['title']}: supersedes \"{clean_line(p['Supersedes'], 240)}\".",
             "Find the old claim on the affected pages and mark it superseded."])
     if not is_empty(p["Open questions"]):
         review(p["project"], rel, "open questions from an update", [clean_line(p["Open questions"], 400)])
-    if unresolved and not targets:
+    if unresolved and not targets and not new_topics:
         review(p["project"], rel, "affected pages not found",
                [f"{p['title']} names pages that do not exist yet: {', '.join(unresolved)}."])
+
+
+# ================================================================ end of run =====
+def prose_context(wiki, claims, rel, kind):
+    """What the model may use for a page's overview: its recorded facts, relationships
+    and roles (an entity), or the points its documents make (a topic)."""
+    title = wiki.pages[rel]["title"]
+    title_of = lambda r: wiki.pages.get(r, {}).get("title") or r  # noqa: E731
+    if kind == "topic":
+        pts = claims.records("_point", rel)
+        if not pts:
+            return ""
+        return f"Topic: {title}\nPoints from its documents:\n" + "\n".join(
+            f"- {r['value']} ({r.get('source_title') or 'a document'}, {r.get('doc_date') or 'undated'})"
+            for r in sorted(pts, key=F.Claims.order, reverse=True)[:30])
+    tags = wiki.pages[rel].get("tags") or []
+    kind_word = next((t for t in tags if t in ("company", "person", "product")), "")
+    lines = [f"Page: {title}" + (f" ({kind_word})" if kind_word else "")]
+    own = "own-company" in tags
+    if own:
+        lines.append("This is the business's own company: the documents are its records.")
+    roles = [f"{r['value']} ({r.get('source_title') or 'a document'})" for r in claims.records("_doc", rel) if r.get("value")]
+    if roles and not own:
+        lines += ["Its role in the documents:"] + [f"- {x}" for x in list(dict.fromkeys(roles))[:12]]
+    facts = []
+    # A person's page gets no dates or references: "prepared on 3 July" is about a document.
+    skip = {"date", "deadline", "reference", "other"} | ({"address", "start_date", "end_date", "due_date"}
+                                                        if kind_word == "person" else set())
+    groups = [g for g in claims.facts(rel) if g[0]["attribute"] not in skip]
+    groups = [g for g in groups if g[0]["attribute"] in F.COMPARED] + [g for g in groups if g[0]["attribute"] not in F.COMPARED]
+    for g in groups[:15]:
+        cur = g[0]
+        older = [r for r in g[1:] if not F.same_norm(r.get("norm"), cur.get("norm"))]
+        facts.append(f"- {LP.fact_label(cur, title_of)}: {cur['value']}"
+                     + (f" (before: {older[0]['value']})" if older else ""))
+    if facts:
+        lines += ["Current facts:"] + facts
+    rels = []
+    for r in LP.plausible(claims.records("_rel", rel, other=True)):
+        rels.append("- " + LP.relation_sentence(title_of(r["page"]), r.get("qualifier"), title_of(r["counterparty"])))
+    if rels:
+        lines += ["Relationships:"] + list(dict.fromkeys(rels))[:15]
+    body = split_frontmatter(read(rel))[1]
+    found = LP.find_block(body)
+    human = (body[:found[0]] + body[found[1]:]) if found else body
+    human = re.sub(r"^## (From sources|Updates)\s*\n(?:.*\n?)*?(?=^## |\Z)", "", human, flags=re.M).strip()
+    if human:
+        lines += ["What the page already says:", human[:1200]]
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def link_names(wiki, rel):
+    names = []
+    for r, p in wiki.pages.items():
+        if r == rel or not r.startswith(("wiki/companies/", "wiki/products/", "wiki/finance-legal/", "wiki/how-it-runs/")):
+            continue
+        if os.path.basename(r)[:-3] in SEED_PAGES:
+            continue
+        names.append((p["title"], wiki.link(r)))
+        names += [(a, wiki.link(r, a)) for a in p.get("aliases") or [] if len(a) >= 4]
+    return names
+
+
+def refresh(model, wiki, claims, sysmsg, touched):
+    """A short overview, written by the model from what is recorded, on every page this
+    run touched; code rebuilds the rest of each page's block. A failure leaves a page's
+    previous overview in place and never fails the run."""
+    items = [(r, k) for r, k in touched.items() if os.path.exists(os.path.join(WIKI_DIR, r))]
+    Run.current = ""
+    for n, (rel, kind) in enumerate(items, 1):
+        title = wiki.pages.get(rel, {}).get("title") or rel
+        engine_topic = kind != "topic" or wiki.pages.get(rel, {}).get("engine")
+        try:
+            ctx = prose_context(wiki, claims, rel, kind) if engine_topic else ""
+        except Exception as e:
+            log(f"overview of {rel} skipped: {e}")
+            ctx = ""
+        overview = None
+        if ctx:
+            say("write", f"writing the overview of {clean_line(title, 50)}", n=n, of=len(items))
+            what = ("explain this topic for the business, from the points its documents make; each point names its "
+                    "document and date, figures from different documents are never combined into one statement, and "
+                    "where two points disagree the newer document's holds (give the older value only as what it was)"
+                    if kind == "topic" else "say who or what this is for the business and what currently holds")
+            model.deadline = time.time() + Run.prose_budget
+            try:
+                a = model.ask(sysmsg, f"Write 2 to 4 short sentences for the top of the wiki page \"{title}\": {what}. "
+                              "Use only the information below and add nothing else. Keep names, amounts and dates "
+                              "exactly as given. Where a value changed, give the current one and what it was before.\n\n"
+                              + ctx, PROSE_SCHEMA, max_tokens=500)
+                nums = F.numbers_in(ctx)
+                keep = [s for s in (a.get("sentences") or []) if clean_line(s) and not F.ungrounded_numbers(s, nums)]
+                if keep:
+                    names = link_names(wiki, rel)
+                    overview = " ".join(LP.linked(s, names, 600) for s in keep)
+            except (ModelUnavailable, DocTimeout) as e:
+                log(f"overviews stopped: {e}")
+                break
+            except Exception as e:
+                log(f"overview of {rel} skipped: {e}")
+            finally:
+                model.deadline = None
+        fm, body = split_frontmatter(read(rel))
+        content = topic_block(wiki, claims, rel, overview) if kind == "topic" else entity_block(wiki, claims, rel, overview)
+        engine_page = wiki.pages.get(rel, {}).get("engine")
+        new_body, outcome = LP.put_block(body, content, "top" if (kind != "topic" or engine_page) else "end")
+        if outcome == "written":
+            write(rel, ("---\n" + fm.strip("\n") + "\n---\n" if fm else "") + new_body)
+            page_event(rel, False, wiki)
+
+
+def at_a_glance(wiki, claims):
+    """The overview page's engine block: what the wiki holds, built by code."""
+    rel = "wiki/overview.md"
+    if not os.path.exists(os.path.join(WIKI_DIR, rel)):
+        return
+    link = link_of(wiki)
+    docs = {}
+    for r in claims.records("_doc"):
+        if r.get("summary") in wiki.pages and r["summary"].startswith("wiki/sources/"):
+            docs.setdefault(r["summary"], r)
+    latest = sorted(docs.values(), key=F.Claims.order, reverse=True)[:5]
+    count = {}
+    for r in claims.records("_doc"):
+        if r["page"] in wiki.pages:
+            count.setdefault(r["page"], set()).add(r.get("source"))
+    parties = sorted(count, key=lambda p: (-len(count[p]), p))[:6]
+    topics = [r for r, _ in wiki.topics()][:12]
+    decisions = sorted((r for r in wiki.pages if r.startswith("wiki/decisions/")), reverse=True)[:5]
+    try:
+        waiting = len(re.findall(r"^## \[", read("wiki/_review.md"), re.M))
+    except OSError:
+        waiting = 0
+    n_sources = len([r for r in wiki.pages if r.startswith("wiki/sources/")])
+    lines = ["## At a glance", "", "_Kept up to date by the wiki on every run._", ""]
+    if n_sources:
+        lines.append(f"- **Documents read:** {n_sources}" + (". Latest: " + ", ".join(
+            link(r["summary"]) + (f" ({r['doc_date']})" if r.get("doc_date") else "") for r in latest) if latest else ""))
+    if parties:
+        lines.append("- **Named most often:** " + ", ".join(link(p) for p in parties))
+    if topics:
+        lines.append("- **Topics:** " + ", ".join(link(t) for t in topics))
+    if decisions:
+        lines.append("- **Latest decisions:** " + ", ".join(link(d) for d in decisions))
+    lines.append(f"- **Review queue:** {waiting} item(s) waiting for a person" if waiting else "- **Review queue:** empty")
+    fm, body = split_frontmatter(read(rel))
+    new_body, outcome = LP.put_block(body, "\n".join(lines), "end")
+    if outcome == "written":
+        write(rel, ("---\n" + fm.strip("\n") + "\n---\n" if fm else "") + new_body)
+        page_event(rel, False, wiki)
 
 
 # ======================================================================= run =====
@@ -1246,30 +2323,45 @@ def run(server=None, only_docs=None, packets_only=False):
     packets = [] if only_docs is not None else [p for p in pending("raw/inbox") if p.endswith((".md", ".markdown"))]
     if not docs and not packets:
         return 0
-    cfg = load_config().get("localModel") or {}
+    config = load_config()
+    cfg = config.get("localModel") or {}
+    Run.company = clean_line(config.get("company"), 120)
+    Run.doc_budget = float(cfg.get("docBudgetSeconds") or DOC_BUDGET_SECONDS)
+    Run.prose_budget = float(cfg.get("proseBudgetSeconds") or PROSE_BUDGET_SECONDS)
     sysmsg = system_prompt(house_rules())
     wiki_events.emit("claude-start", label="local")
     t0 = time.time()
     ok = True
     model = Model(url=server, cfg=cfg)
+    claims = F.Claims(os.path.join(WIKI_DIR, "archive", "claims.jsonl"))
+    touched = {}
     try:
         wiki = Wiki()
         for kind, items, fn in (("document", docs, process_document), ("packet", packets, process_packet)):
             for src in items:
                 try:
-                    fn(model, wiki, src, sysmsg)
+                    fn(model, wiki, claims, src, sysmsg, touched)
                 except ModelUnavailable:
                     raise
                 except Exception as e:  # one bad file never stops the others
                     ok = False
                     log(f"{src}: {e}")
                     wiki_events.emit("error", file=src, msg=f"{os.path.basename(src)}: {e}")
+        # Every file is done; what follows can only improve pages, never fail a file.
+        try:
+            refresh(model, wiki, claims, sysmsg, touched)
+            at_a_glance(wiki, claims)
+        except ModelUnavailable as e:
+            log(f"overviews stopped: {e}")
+        except Exception as e:
+            log(f"overviews skipped: {e}")
     except ModelUnavailable as e:
         log(str(e))
         wiki_events.emit("claude-end", label="local", ok=False, detail=str(e))
         return 2
     finally:
         model.stop()
+        claims.save()
     stats = model.stats
     secs = round(time.time() - t0)
     wiki_events.emit("claude-end", label="local", ok=True, turns=stats["calls"], cost=0,

@@ -93,6 +93,13 @@ facts:
   tin_no: "C0000000000"
 ```
 
+- **Pages from the model on this Mac.** If the wiki was ever run with the model on this
+  Mac, pages can hold a block between `<!-- wiki-engine:start ... -->` and
+  `<!-- wiki-engine:end -->` (Overview, Current facts, Related, Documents), and the
+  figures it read are listed in `archive/claims.jsonl`. Edit the block like any other
+  text; the model never overwrites a block that was edited. Leave
+  `archive/claims.jsonl` alone.
+
 ---
 
 ## Operation: INTAKE (documents in `raw/_intake/`)
