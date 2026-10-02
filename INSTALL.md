@@ -162,16 +162,25 @@ works*) follow the engine's instructions only while nobody has edited them.
 
 ## Removing it
 
+Paste each block into Terminal on its own. First stop the wiki and remove its background
+processes:
+
 ```sh
 for a in ~/Library/LaunchAgents/local.wiki-starter.*.plist; do
-  launchctl bootout "gui/$(id -u)" "$a"; rm "$a"
+  launchctl bootout "gui/$(id -u)" "$a" 2>/dev/null; rm -f "$a"
 done
+```
+
+Then remove the Anthropic sign-in, the model on this Mac (if it was downloaded), llama.cpp
+and the Desktop shortcuts:
+
+```sh
 security delete-generic-password -s wiki-starter -a claude-oauth-token 2>/dev/null
 security delete-generic-password -s wiki-starter -a anthropic-api-key 2>/dev/null
-rm -rf ~/Library/"Application Support"/wiki-starter   # the local model, if downloaded
+rm -rf ~/Library/"Application Support"/wiki-starter
 brew uninstall llama.cpp 2>/dev/null
 rm -f ~/Desktop/"Open Wiki.webloc" ~/Desktop/"Wiki Inbox" ~/Desktop/"Wiki Intake"
 ```
 
-This stops the wiki and removes the sign-in. Your wiki folder in `~/Wiki/` is left in
-place; delete it yourself if you no longer need it.
+Your wiki folder in `~/Wiki/` is left in place. To delete it as well, see *Uninstall* in
+`README.md`.

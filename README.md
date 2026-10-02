@@ -127,25 +127,46 @@ options compare are in `INSTALL.md`.
 First copy `~/Wiki/<your wiki>/raw/` somewhere safe if you need the documents. Files you
 dragged in with Finder were moved there, so it may hold the only copies.
 
-Then paste the following into Terminal. In the last line, use your own wiki's folder name:
+Then paste the blocks below into Terminal one at a time.
 
-```bash
-# 1. Stop and remove the background processes
+**1. Stop and remove the background processes:**
+
+```sh
 for p in ~/Library/LaunchAgents/local.wiki-starter.*.plist; do
   launchctl bootout "gui/$(id -u)" "$p" 2>/dev/null; rm -f "$p"
 done
+```
 
-# 2. Remove the Anthropic sign-in (if Claude was used)
+**2. Remove the Anthropic sign-in from the Keychain** (it is there only if Claude was used):
+
+```sh
 security delete-generic-password -s wiki-starter -a claude-oauth-token 2>/dev/null
 security delete-generic-password -s wiki-starter -a anthropic-api-key 2>/dev/null
+```
 
-# 3. Remove Desktop shortcuts, logs and the local model (if downloaded)
+**3. Remove the Desktop shortcuts, the logs and the model on this Mac** (if it was
+downloaded):
+
+```sh
 rm -f ~/Desktop/"Wiki Inbox" ~/Desktop/"Wiki Intake" ~/Desktop/"Open Wiki.webloc"
-rm -rf ~/Library/Logs/wiki-starter
-rm -rf ~/Library/"Application Support"/wiki-starter
+rm -rf ~/Library/Logs/wiki-starter ~/Library/"Application Support"/wiki-starter
+```
 
-# 4. Delete the wiki: pages, history and documents
-rm -rf ~/Wiki/company-wiki
+**4. Delete the wiki: its pages, history and documents.** If it is the only wiki on this
+Mac, delete the whole Wiki folder:
+
+```sh
+rm -rf ~/Wiki
+```
+
+To delete only one of several wikis, list them with `ls ~/Wiki` and delete that one by its
+folder name, for example `rm -rf ~/Wiki/my-company`.
+
+**Check that nothing is left.** This prints nothing, apart from a "No such file or
+directory" line for `~/Wiki` if you deleted it:
+
+```sh
+ls ~/Library/LaunchAgents | grep wiki-starter; ls ~/Wiki
 ```
 
 **Optional:** remove the tools the installer added. Only do this if nothing else on the

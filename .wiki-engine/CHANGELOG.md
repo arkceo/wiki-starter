@@ -2,6 +2,15 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Uninstall steps that paste cleanly
+- The uninstall commands in the README and `INSTALL.md` contained comment lines. Terminal
+  on a Mac (zsh) does not accept those when they are pasted: it showed errors, and one
+  line could pass stray words to a delete command. Each step is now its own block with
+  its explanation above it.
+- The step that deletes the wiki no longer uses an example folder name that could miss
+  yours. It deletes the Wiki folder, or says how to delete one wiki of several, and a
+  final line checks that nothing is left.
+
 ## A richer wiki from the model on this Mac
 - The model on this Mac now builds the same kinds of pages as Claude: a summary of each
   document; a page for each company, person and product it names, with its current facts,
