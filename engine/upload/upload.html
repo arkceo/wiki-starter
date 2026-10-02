@@ -7,73 +7,133 @@
 <title>Upload &amp; Logs</title>
 <style>
   :root {
-    --bg: #faf8f8; --panel: #ffffff; --text: #2b2b2b; --muted: #6b6b6b; --line: #e3e1e1;
-    --accent: #284b63; --accent-soft: #e6eef3; --ok: #2e7d4f; --warn: #a86400; --bad: #b3261e;
+    --bg: #f6f5f4; --panel: #ffffff; --inset: #f7f6f5; --text: #2b2b2b; --muted: #6b6b6b; --line: #e3e1e1;
+    --accent: #284b63; --accent-soft: #e6eef3; --ok: #2e7d4f; --ok-soft: #e5f2ea; --warn: #a86400;
+    --warn-soft: #fbf0df; --bad: #b3261e; --bad-soft: #fbe7e5;
     --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #161618; --panel: #1f1f22; --text: #ebebec; --muted: #a3a3a8; --line: #33333a;
-      --accent: #84a59d; --accent-soft: #24302d; --ok: #6cc28f; --warn: #e0a54b; --bad: #f08b84;
+      --bg: #161618; --panel: #1f1f22; --inset: #19191c; --text: #ebebec; --muted: #a3a3a8; --line: #33333a;
+      --accent: #84a59d; --accent-soft: #24302d; --ok: #6cc28f; --ok-soft: #1d2b23; --warn: #e0a54b;
+      --warn-soft: #2e2617; --bad: #f08b84; --bad-soft: #321d1c;
     }
   }
   :root[data-theme="dark"] {
-    --bg: #161618; --panel: #1f1f22; --text: #ebebec; --muted: #a3a3a8; --line: #33333a;
-    --accent: #84a59d; --accent-soft: #24302d; --ok: #6cc28f; --warn: #e0a54b; --bad: #f08b84;
+    --bg: #161618; --panel: #1f1f22; --inset: #19191c; --text: #ebebec; --muted: #a3a3a8; --line: #33333a;
+    --accent: #84a59d; --accent-soft: #24302d; --ok: #6cc28f; --ok-soft: #1d2b23; --warn: #e0a54b;
+    --warn-soft: #2e2617; --bad: #f08b84; --bad-soft: #321d1c;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-  main { max-width: 60rem; margin: 0 auto; padding: 1.5rem 16px 4rem; }
-  header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
-  h1 { font-size: 1.6rem; margin: 0; }
-  h2 { font-size: 1.05rem; margin: 2rem 0 0.6rem; }
   a { color: var(--accent); }
   .muted { color: var(--muted); }
-  #drop { margin-top: 1.25rem; border: 2px dashed var(--line); border-radius: 12px; background: var(--panel);
-          padding: 2.25rem 1rem; text-align: center; transition: border-color .15s, background .15s; }
-  #drop.over { border-color: var(--accent); background: var(--accent-soft); }
-  #drop strong { display: block; font-size: 1.15rem; margin-bottom: .35rem; }
-  .buttons { display: flex; gap: .5rem; justify-content: center; flex-wrap: wrap; margin-top: 1rem; }
-  button, .btn { font: inherit; font-weight: 600; border-radius: 8px; padding: .5rem .95rem; cursor: pointer;
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  h1 { font-size: 1.35rem; margin: 0; }
+  h2 { font-size: 1rem; margin: 0; }
+  button, .btn { font: inherit; font-weight: 600; border-radius: 8px; padding: .45rem .9rem; cursor: pointer;
                  border: 1px solid var(--accent); background: var(--accent); color: #fff; }
   button.secondary { background: transparent; color: var(--accent); }
-  button:disabled { opacity: .55; cursor: default; }
-  .bar-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap;
-             margin-top: 1.25rem; padding: .75rem 1rem; background: var(--panel); border: 1px solid var(--line);
-             border-radius: 10px; }
-  #state::before { content: ""; display: inline-block; width: .6rem; height: .6rem; border-radius: 50%;
-                   margin-right: .45rem; background: var(--muted); vertical-align: middle; }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=file] { display: none; }
+
+  /* One screen: status and adding files on top, then files and the log side by side. On a
+     big enough window the page never scrolls; the file list and the log scroll inside. */
+  .app { max-width: 1680px; margin: 0 auto; padding: 14px 20px 18px; display: grid; gap: 14px;
+         grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+         grid-template-areas: "top top" "status add" "files log";
+         grid-template-rows: auto auto minmax(20rem, 1fr); min-height: 100vh; }
+  @media (min-width: 1000px) and (min-height: 680px) { .app { height: 100vh; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; min-width: 0; }
+
+  .top { grid-area: top; display: flex; align-items: center; justify-content: space-between; gap: .5rem 1rem; flex-wrap: wrap; }
+  .brand { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; min-width: 0; }
+  .top-right { display: flex; align-items: center; gap: 1rem; }
+  .badge { font-size: .8rem; font-weight: 600; padding: .15rem .6rem; border-radius: 999px;
+           background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+  .badge:empty { display: none; }
+
+  /* Status: the answer to "what is happening and how far along is it" at one glance. */
+  .status { grid-area: status; padding: 1rem 1.1rem; display: flex; flex-direction: column; gap: .55rem; }
+  .status-head { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
+  #state { font-weight: 700; font-size: 1.05rem; }
+  #state::before { content: ""; display: inline-block; width: .65rem; height: .65rem; border-radius: 50%;
+                   margin-right: .5rem; background: var(--muted); vertical-align: .05rem; }
   #state.busy::before { background: var(--warn); animation: pulse 1.2s infinite; }
   #state.idle::before { background: var(--ok); }
   @keyframes pulse { 50% { opacity: .3; } }
-  .overall { flex: 1 1 14rem; min-width: 0; }
+  #run-meta { margin-left: .4rem; font-size: .9rem; }
+  .progress-line { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+  .big { font-size: 1.9rem; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .big .of { font-size: 1rem; font-weight: 500; color: var(--muted); }
+  #pct { font-size: 1.05rem; font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
   /* Two tones, like a video's buffered and played: light = converted, solid = done. */
-  .meter { position: relative; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin-top: .3rem; }
+  .meter { position: relative; height: 10px; border-radius: 5px; background: var(--line); overflow: hidden; }
   .meter > span { position: absolute; inset: 0 auto 0 0; width: 0; transition: width .3s; }
   .meter > .buf { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent-soft); }
   .meter > .fill { background: var(--accent); }
   .meter.done > .fill { background: var(--ok); }
   /* The live line: what the computer is doing at this moment. */
-  #now { margin-top: .45rem; font-size: .9rem; min-height: 1.4em; overflow-wrap: anywhere; }
+  #now { font-size: .92rem; padding: .45rem .7rem; border-radius: 8px; background: var(--inset);
+         border: 1px solid var(--line); overflow-wrap: anywhere; }
   #now .glyph { display: inline-block; width: 1.1em; color: var(--warn); font-family: var(--mono); }
   #now .verb { color: var(--accent); font-weight: 600; }
   #now .obj { font-weight: 600; }
   #now .paren { color: var(--muted); }
-  #now:empty { display: none; }
-  #files { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 10px;
-           background: var(--panel); }
-  #files:empty::before { content: "Nothing uploaded yet."; display: block; padding: .9rem 1rem; color: var(--muted); }
-  #summary:not(:empty)::before { content: "· "; }
-  #files li { padding: .75rem 1rem; border-top: 1px solid var(--line); }
-  #files li:first-child { border-top: 0; }
-  .file-head { display: flex; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
-  .file-name { font-weight: 600; word-break: break-word; }
-  .stage { font-size: .88rem; white-space: nowrap; }
-  .stage.ok { color: var(--ok); } .stage.warn { color: var(--warn); } .stage.bad { color: var(--bad); }
+  #now:empty::before { content: "Nothing is being read right now."; color: var(--muted); }
+  #review-note { font-size: .88rem; padding: .4rem .7rem; border-radius: 8px; background: var(--warn-soft); }
+  #review-note[hidden] { display: none; }
+  .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; margin-top: .15rem; }
+  .tile { display: flex; flex-direction: column; align-items: flex-start; gap: .05rem; text-align: left;
+          padding: .5rem .7rem; border-radius: 10px; border: 1px solid var(--line); background: var(--inset);
+          color: var(--text); font-weight: 500; }
+  .tile b { font-size: 1.35rem; line-height: 1.15; font-variant-numeric: tabular-nums; }
+  .tile span { font-size: .8rem; color: var(--muted); }
+  .tile.t-active b { color: var(--accent); }
+  .tile.t-done b { color: var(--ok); }
+  .tile.t-attention.has b { color: var(--bad); }
+  .tile.t-attention.has { background: var(--bad-soft); border-color: transparent; }
+  .tile[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+
+  /* Adding files: always in view, never in the way. The whole page also takes a drop. */
+  .add { grid-area: add; padding: 1rem 1.1rem; border: 2px dashed var(--line); display: flex; flex-direction: column;
+         justify-content: center; gap: .55rem; text-align: center; transition: border-color .15s, background .15s; }
+  .add.over { border-color: var(--accent); background: var(--accent-soft); }
+  .add strong { font-size: 1.05rem; }
+  .add .buttons { display: flex; gap: .5rem; justify-content: center; flex-wrap: wrap; }
+  .add .small { font-size: .82rem; margin: 0; }
+  #overlay { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center;
+             background: color-mix(in srgb, var(--accent) 18%, transparent); pointer-events: none; }
+  #overlay[hidden] { display: none; }
+  #overlay div { font-size: 1.4rem; font-weight: 700; padding: 1.4rem 2.2rem; border-radius: 14px;
+                 background: var(--panel); border: 2px dashed var(--accent); color: var(--accent); }
+
+  /* Files and log: each fills its column and scrolls on its own. */
+  .panel { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  #files-panel { grid-area: files; }
+  #log-panel { grid-area: log; position: relative; }
+  .panel-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem 1rem; flex-wrap: wrap;
+                padding: .7rem 1rem; border-bottom: 1px solid var(--line); }
+  .panel-head .muted { font-weight: 400; font-size: .88rem; }
+  .linkish { background: none; border: 0; padding: 0; color: var(--accent); font-weight: 600; font-size: .85rem; text-decoration: underline; }
+  .legend { font-size: .76rem; color: var(--muted); padding: .35rem 1rem; border-bottom: 1px solid var(--line); }
+  #files { list-style: none; margin: 0; padding: 0; overflow: auto; flex: 1 1 auto; min-height: 0; }
+  #files li.empty { padding: 1.5rem 1rem; color: var(--muted); text-align: center; }
+  #files li.group { position: sticky; top: 0; z-index: 1; padding: .3rem 1rem; font-size: .74rem; font-weight: 700;
+                    letter-spacing: .04em; text-transform: uppercase; color: var(--muted); background: var(--inset);
+                    border-bottom: 1px solid var(--line); }
+  #files li.file { padding: .55rem 1rem; border-bottom: 1px solid var(--line); }
+  #files li.file.g-active { background: color-mix(in srgb, var(--accent-soft) 45%, transparent); }
+  .file-main { display: grid; grid-template-columns: 1.1rem minmax(0, 1fr) 9.5rem 14rem; align-items: center; gap: .65rem; }
+  .file-icon { font-size: .85rem; text-align: center; color: var(--muted); }
+  .g-done .file-icon { color: var(--ok); } .g-attention .file-icon { color: var(--bad); } .g-active .file-icon { color: var(--accent); }
+  .file-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stage { font-size: .84rem; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stage.ok { color: var(--ok); } .stage.warn { color: var(--warn); } .stage.bad { color: var(--bad); } .stage.muted { color: var(--muted); }
   /* One segment per real stage. Solid = finished; shimmering = happening now; a partial
      fill only where the progress is measured (upload bytes). Waiting is not a stage. */
-  .steps { display: flex; gap: .25rem; margin-top: .45rem; }
+  .steps { display: flex; gap: .2rem; }
   .steps span { flex: 1; height: 6px; border-radius: 3px; background: var(--line); position: relative; overflow: hidden; }
   .steps span.on { background: var(--accent); }
   .steps.done span.on { background: var(--ok); }
@@ -84,59 +144,110 @@
     background: linear-gradient(90deg, transparent 0%, var(--accent) 45%, var(--accent) 55%, transparent 100%);
     background-size: 50% 100%; background-repeat: no-repeat; }
   @keyframes shimmer { from { background-position: -50% 0; } to { background-position: 150% 0; } }
-  #files li.legend { display: flex; gap: .25rem; padding: .45rem 1rem; font-size: .75rem; color: var(--muted); }
-  #files li.legend span { flex: 1; }
+  .detail { font-size: .8rem; color: var(--muted); margin: .25rem 0 0 1.75rem; display: flex; flex-wrap: wrap; gap: .1rem .6rem; }
+  .detail a { white-space: nowrap; }
+
+  .log-tools { display: flex; align-items: center; gap: .8rem; font-size: .85rem; }
+  .log-tools label { display: flex; align-items: center; gap: .3rem; cursor: pointer; color: var(--muted); }
+  #log { flex: 1 1 auto; min-height: 0; overflow: auto; margin: 0; padding: .55rem 1rem; font-size: .84rem; line-height: 1.55; }
+  #log > div { display: grid; grid-template-columns: 4.6rem minmax(0, 1fr); gap: .5rem; overflow-wrap: anywhere; }
+  #log .t { color: var(--muted); font: .78rem/1.9 var(--mono); }
+  #log .bad { color: var(--bad); } #log .ok { color: var(--ok); } #log .warn { color: var(--warn); }
+  #log .old { opacity: .6; }
+  #log > div.divider { display: block; color: var(--muted); border-top: 1px dashed var(--line); margin: .4rem 0; padding-top: .2rem; font-size: .78rem; }
+  #log.problems > div:not(.p):not(.divider) { display: none; }
+  #log:empty::before { content: "Nothing has happened yet."; color: var(--muted); }
+  #jump { position: absolute; right: 1rem; bottom: .8rem; font-size: .8rem; padding: .3rem .7rem; border-radius: 999px;
+          box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+  #jump[hidden] { display: none; }
+  footer { font-size: .78rem; text-align: right; }
+
+  .tabs { display: none; }
+  /* A narrow window: one column, and the files and the log share one panel with tabs. */
+  @media (max-width: 999px) {
+    .app { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "status" "add" "tabs" "panel";
+           grid-template-rows: auto; padding: 12px 16px 16px; }
+    #files-panel, #log-panel { grid-area: panel; height: 75vh; }
+    .app[data-tab="files"] #log-panel, .app[data-tab="log"] #files-panel { display: none; }
+    .tabs { grid-area: tabs; display: flex; gap: .4rem; }
+    .tabs button { flex: 1; }
+    .tabs button[aria-selected="false"] { background: transparent; color: var(--accent); }
+    .file-main { grid-template-columns: 1.1rem minmax(0, 1fr) auto; }
+    .file-main .steps { grid-column: 2 / -1; grid-row: 2; }
+    .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
   @media (prefers-reduced-motion: reduce) {
     .steps span.active::after { animation: none; background: var(--accent); opacity: .45; background-size: 100% 100%; }
     #state.busy::before { animation: none; }
   }
-  .detail { font-size: .86rem; color: var(--muted); margin-top: .35rem; word-break: break-word; }
-  .detail a { margin-right: .6rem; }
-  #log { margin: 0; padding: .75rem 1rem; height: 22rem; overflow: auto; border: 1px solid var(--line);
-         border-radius: 10px; background: var(--panel); font: 12.5px/1.55 var(--mono); white-space: pre-wrap; }
-  #log .t { color: var(--muted); }
-  #log .bad { color: var(--bad); } #log .ok { color: var(--ok); } #log .warn { color: var(--warn); }
-  #log .old { opacity: .6; }
-  #log .divider { color: var(--muted); border-top: 1px dashed var(--line); margin: .4rem 0; padding-top: .2rem; }
-  input[type=file] { display: none; }
 </style>
 </head>
 <body>
-<main>
-  <header>
-    <h1>Upload &amp; Logs</h1>
-    <a href="/" id="back">← Back to the wiki</a>
+<div class="app" id="app" data-tab="files">
+  <header class="top">
+    <div class="brand"><h1>Upload &amp; Logs</h1><span class="muted" id="wiki-title"></span></div>
+    <div class="top-right"><span class="badge" id="engine"></span><a href="/" id="back">← Back to the wiki</a></div>
   </header>
-  <p class="muted" id="intro">Drop documents (PDF, Word, Excel, PowerPoint, scans, photos) to turn them into wiki
-    pages, or Update Packets (<code>.md</code>) to update pages. Everything stays on this Mac.</p>
 
-  <section id="drop" aria-label="Drop files here">
+  <section class="card status" aria-label="Status">
+    <div class="status-head">
+      <div><span id="state">Checking…</span><span class="muted" id="run-meta"></span></div>
+      <button type="button" class="secondary" id="process">Process now</button>
+    </div>
+    <div class="progress-line">
+      <div class="big"><span id="done-n">0</span><span class="of"> of <span id="total-n">0</span> done</span></div>
+      <div id="pct"></div>
+    </div>
+    <div class="meter" id="overall-meter" title="Light: converted to text. Solid: done.">
+      <span class="buf"></span><span class="fill"></span></div>
+    <div id="now" aria-live="off"></div>
+    <div id="review-note" hidden></div>
+    <div class="tiles" role="group" aria-label="Show files by status">
+      <button type="button" class="tile t-active" data-filter="active" aria-pressed="false"><b id="n-active">0</b><span>In progress</span></button>
+      <button type="button" class="tile t-waiting" data-filter="waiting" aria-pressed="false"><b id="n-waiting">0</b><span>Waiting</span></button>
+      <button type="button" class="tile t-done" data-filter="done" aria-pressed="false"><b id="n-done">0</b><span>Done</span></button>
+      <button type="button" class="tile t-attention" data-filter="attention" aria-pressed="false"><b id="n-attention">0</b><span>Needs attention</span></button>
+    </div>
+    <div class="sr" id="summary" aria-live="polite"></div>
+  </section>
+
+  <section class="card add" id="drop" aria-label="Add documents">
     <strong>Drop files or folders here</strong>
-    <span class="muted" id="limit"></span>
+    <p class="small muted">or anywhere on this page</p>
     <div class="buttons">
       <button type="button" id="pick">Choose files</button>
       <button type="button" class="secondary" id="pick-folder">Choose a folder</button>
     </div>
+    <p class="small muted"><span id="limit"></span> PDF, Word, Excel, PowerPoint, scans and photos become
+      wiki pages; Update Packets (<code>.md</code>) update them. Everything stays on this Mac.</p>
     <input type="file" id="file-input" multiple>
     <input type="file" id="folder-input" webkitdirectory multiple>
   </section>
 
-  <div class="bar-row">
-    <div class="overall">
-      <div><span id="state">Checking…</span> <span class="muted" id="summary"></span></div>
-      <div class="meter" id="overall-meter" title="Light: converted to text. Solid: done.">
-        <span class="buf"></span><span class="fill"></span></div>
-      <div id="now" aria-live="off"></div>
-    </div>
-    <button type="button" class="secondary" id="process">Process now</button>
+  <div class="tabs" role="tablist" aria-label="Files or log">
+    <button type="button" role="tab" data-tab="files" aria-selected="true">Files</button>
+    <button type="button" role="tab" data-tab="log" aria-selected="false">Live log</button>
   </div>
 
-  <h2>Files</h2>
-  <ul id="files" aria-live="polite"></ul>
+  <section class="card panel" id="files-panel" aria-labelledby="files-h">
+    <div class="panel-head">
+      <h2 id="files-h">Files <span class="muted" id="files-count"></span></h2>
+      <button type="button" class="linkish" id="show-all" hidden>Show all files</button>
+    </div>
+    <div class="legend" id="legend">Stages: Upload → Convert → Read &amp; write → File. Update Packets: Upload → Read → Apply.</div>
+    <ul id="files"></ul>
+  </section>
 
-  <h2>Live log</h2>
-  <pre id="log" aria-live="polite"></pre>
-</main>
+  <section class="card panel" id="log-panel" aria-labelledby="log-h">
+    <div class="panel-head">
+      <h2 id="log-h">Live log</h2>
+      <div class="log-tools"><label><input type="checkbox" id="problems-only"> Problems only</label></div>
+    </div>
+    <div id="log" role="log" aria-live="off"></div>
+    <button type="button" id="jump" hidden>↓ Latest</button>
+  </section>
+</div>
+<div id="overlay" hidden><div>Drop to upload</div></div>
 
 <script>
 (() => {
@@ -151,9 +262,12 @@
     if (saved === "dark" || saved === "light") document.documentElement.setAttribute("data-theme", saved)
   } catch (_) {}
   document.title = "Upload & Logs · " + BOOT.title
+  document.getElementById("wiki-title").textContent = BOOT.title || ""
 
   const $ = (id) => document.getElementById(id)
-  const filesEl = $("files"), logEl = $("log"), nowEl = $("now")
+  const filesEl = $("files"), logEl = $("log"), nowEl = $("now"), app = $("app")
+  let filter = ""                 // "", "active", "waiting", "done", "attention"
+  let lastSummary = ""
   const rows = new Map()          // queue path (or temporary upload id) -> row state
   const order = []
   let uploading = 0
@@ -288,6 +402,62 @@
   }
 
   // ------------------------------------------------------------------ render
+  // Every file is in one group; the list shows what needs an eye first.
+  const ACTIVE = new Set(["uploading", "converting", "ocr", "reading", "filing", "applying"])
+  const GROUPS = [["active", "In progress"], ["attention", "Needs attention"], ["waiting", "Waiting"], ["done", "Done"]]
+  const ICON = { active: "●", attention: "!", waiting: "○", done: "✓", other: "·" }
+  function groupOf(r) {
+    if (r.final === "duplicate") return "other"
+    if (r.final === "filed" || r.final === "applied") return "done"
+    if (r.final || r.retry) return "attention"
+    return ACTIVE.has(r.state) ? "active" : "waiting"
+  }
+  const humanPage = (p) => { const t = base(p).replace(/\.md$/, "").replace(/-/g, " "); return t.charAt(0).toUpperCase() + t.slice(1) }
+
+  function fileItem(r, g) {
+    const stages = r.kind === "packet" ? PACKET_STAGES : DOC_STAGES
+    const li = document.createElement("li"); li.className = "file g-" + g
+    const main = document.createElement("div"); main.className = "file-main"
+    const ic = document.createElement("span"); ic.className = "file-icon"; ic.setAttribute("aria-hidden", "true"); ic.textContent = ICON[g]
+    const nm = document.createElement("span"); nm.className = "file-name"; nm.textContent = r.name; nm.title = r.name
+    const st = document.createElement("span")
+    st.className = "stage " + (FINAL[r.final] || (r.retry ? "warn" : ""))
+    st.textContent = rowLabel(r)
+    st.title = st.textContent
+    labelEls.set(r.key, [st, r])
+    let [finished, active] = r.final === "failed" || r.final === "skipped" || r.final === "duplicate" ? [0, -1]
+      : (PLACE[r.kind][r.state] || [1, -1])
+    if (r.final === "parked" || r.retry) active = -1
+    const bar = document.createElement("div")
+    bar.className = "steps" + ({ ok: " done", warn: " warn", bad: " bad" }[FINAL[r.final]] || (r.retry ? " warn" : ""))
+    bar.title = stages.join(" → ")
+    stages.forEach((name, i) => {
+      const sp = document.createElement("span")
+      sp.title = name
+      if (i < finished) sp.className = "on"
+      else if (i === active) {
+        sp.className = "active"
+        if (i === 0) { const fill = document.createElement("i"); fill.style.width = r.pct + "%"; sp.append(fill) }
+      }
+      bar.append(sp)
+    })
+    main.append(ic, nm, bar, st)
+    li.append(main)
+    const det = document.createElement("div"); det.className = "detail"
+    const add = (node) => { const sp = document.createElement("span"); sp.append(node); det.append(sp) }
+    if (r.size) add(fmtSize(r.size))
+    if (r.note) add(r.note)
+    if (r.to) {
+      const a = document.createElement("a"); a.href = rawUrl(r.to); a.textContent = "Original"; a.target = "_blank"; add(a)
+    }
+    for (const p of r.links.slice(0, 8)) {
+      const a = document.createElement("a"); a.href = pageUrl(p); a.textContent = humanPage(p); a.title = p; add(a)
+    }
+    if (r.links.length > 8) add(`+${r.links.length - 8} more pages`)
+    if (det.childNodes.length) li.append(det)
+    return li
+  }
+
   const labelEls = new Map()
   let renderQueued = false
   function render() {
@@ -295,56 +465,18 @@
     renderQueued = true
     requestAnimationFrame(() => {
       renderQueued = false
+      const keep = filesEl.scrollTop
       filesEl.textContent = ""
       labelEls.clear()
       let total = 0, done = 0, aside = 0, ready = 0
-      const shown = order.slice(0, 200)
-      if (shown.some((k) => rows.get(k) && rows.get(k).kind === "doc")) {
-        const legend = document.createElement("li"); legend.className = "legend"; legend.setAttribute("aria-hidden", "true")
-        for (const s of DOC_STAGES) { const sp = document.createElement("span"); sp.textContent = s; legend.append(sp) }
-        filesEl.append(legend)
-      }
-      for (const key of shown) {
+      const counts = { active: 0, waiting: 0, done: 0, attention: 0 }
+      const byGroup = { active: [], attention: [], waiting: [], done: [], other: [] }
+      for (const key of order) {
         const r = rows.get(key)
         if (!r) continue
-        const stages = r.kind === "packet" ? PACKET_STAGES : DOC_STAGES
-        const li = document.createElement("li")
-        const head = document.createElement("div"); head.className = "file-head"
-        const nm = document.createElement("span"); nm.className = "file-name"; nm.textContent = r.name
-        const st = document.createElement("span")
-        st.className = "stage " + (FINAL[r.final] || (r.retry ? "warn" : ""))
-        st.textContent = rowLabel(r)
-        labelEls.set(key, [st, r])
-        head.append(nm, st)
-        let [finished, active] = r.final === "failed" || r.final === "skipped" || r.final === "duplicate" ? [0, -1]
-          : (PLACE[r.kind][r.state] || [1, -1])
-        if (r.final === "parked" || r.retry) active = -1
-        const bar = document.createElement("div")
-        bar.className = "steps" + ({ ok: " done", warn: " warn", bad: " bad" }[FINAL[r.final]] || (r.retry ? " warn" : ""))
-        stages.forEach((name, i) => {
-          const s = document.createElement("span")
-          s.title = name
-          if (i < finished) s.className = "on"
-          else if (i === active) {
-            s.className = "active"
-            if (i === 0) { const fill = document.createElement("i"); fill.style.width = r.pct + "%"; s.append(fill) }
-          }
-          bar.append(s)
-        })
-        li.append(head, bar)
-        const det = document.createElement("div"); det.className = "detail"
-        if (r.size) det.append(fmtSize(r.size) + "  ")
-        if (r.note) det.append(r.note + "  ")
-        if (r.to) {
-          const a = document.createElement("a"); a.href = rawUrl(r.to); a.textContent = "original"; a.target = "_blank"
-          det.append(a)
-        }
-        for (const p of r.links.slice(0, 8)) {
-          const a = document.createElement("a"); a.href = pageUrl(p); a.textContent = base(p).replace(/\.md$/, "")
-          det.append(a)
-        }
-        if (det.childNodes.length) li.append(det)
-        filesEl.append(li)
+        const g = groupOf(r)
+        byGroup[g].push(r)
+        if (g !== "other") counts[g]++
         if (r.final !== "skipped" && r.final !== "duplicate") {
           total++
           if (r.final === "filed" || r.final === "applied") done++
@@ -352,17 +484,56 @@
           if (r.final === "filed" || r.final === "applied" || RANK[r.state] >= (r.kind === "doc" ? RANK.converted : RANK.reading)) ready++
         }
       }
+      let shown = 0
+      for (const [g, title] of GROUPS) {
+        if (filter && filter !== g) continue
+        const list = byGroup[g]
+        if (!list.length) continue
+        const h = document.createElement("li"); h.className = "group"; h.textContent = `${title} · ${list.length}`
+        filesEl.append(h)
+        for (const r of list.slice(0, 300)) { filesEl.append(fileItem(r, g)); shown++ }
+      }
+      if (!filter) for (const r of byGroup.other.slice(0, 50)) { filesEl.append(fileItem(r, "other")); shown++ }
+      if (!shown) {
+        const li = document.createElement("li"); li.className = "empty"
+        li.textContent = filter ? "No files here right now." : "Nothing uploaded yet. Drop files anywhere on this page."
+        filesEl.append(li)
+      }
+      filesEl.scrollTop = keep
+      for (const k of Object.keys(counts)) $("n-" + k).textContent = counts[k]
+      document.querySelector(".t-attention").classList.toggle("has", counts.attention > 0)
+      $("files-count").textContent = total ? `· ${total}` : ""
+      $("show-all").hidden = !filter
       // Solid: done. Light: converted and ready to be read. No guessed weights.
       const meter = $("overall-meter")
       const pct = total ? Math.round((done / total) * 100) : 0
       meter.querySelector(".fill").style.width = pct + "%"
       meter.querySelector(".buf").style.width = (total ? Math.round((ready / total) * 100) : 0) + "%"
       meter.className = "meter" + (total && done === total ? " done" : "")
-      $("summary").textContent = total
-        ? `${done} of ${total} done${aside ? ` · ${aside} set aside` : ""} · ${pct}%` : ""
+      $("done-n").textContent = done
+      $("total-n").textContent = total
+      $("pct").textContent = total ? pct + "%" : ""
+      const summary = total ? `${done} of ${total} done${aside ? ` · ${aside} set aside` : ""} · ${pct}%` : ""
+      if (summary !== lastSummary) { lastSummary = summary; $("summary").textContent = summary }
       renderNow()
     })
   }
+
+  function setFilter(f) {
+    filter = filter === f ? "" : f
+    for (const t of document.querySelectorAll(".tile")) t.setAttribute("aria-pressed", String(t.dataset.filter === filter))
+    filesEl.scrollTop = 0
+    if (filter) setTab("files")
+    render()
+  }
+  for (const t of document.querySelectorAll(".tile")) t.onclick = () => setFilter(t.dataset.filter)
+  $("show-all").onclick = () => setFilter(filter)
+  function setTab(tab) {
+    app.dataset.tab = tab
+    for (const b of document.querySelectorAll(".tabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === tab))
+    if (tab === "log") toLatest()
+  }
+  for (const b of document.querySelectorAll(".tabs button")) b.onclick = () => setTab(b.dataset.tab)
 
   // ------------------------------------------------------------------ live line
   let glyph = 0
@@ -430,15 +601,17 @@
   function tick() {
     renderNow()
     for (const [el, r] of labelEls.values()) {
-      if (!r.final && !r.retry && ["converting", "ocr", "reading", "filing", "applying"].includes(r.state)) el.textContent = rowLabel(r)
+      if (!r.final && !r.retry && ["converting", "ocr", "reading", "filing", "applying"].includes(r.state)) el.textContent = el.title = rowLabel(r)
     }
   }
   setInterval(tick, 1000)
   if (!reduced) setInterval(() => { glyph++; const g = nowEl.querySelector(".glyph"); if (g) g.textContent = GLYPHS[glyph % GLYPHS.length] }, 120)
 
   // ------------------------------------------------------------------ log
+  // The log follows new lines until the reader scrolls up; "Latest" brings it back.
+  let follow = true
+  const toLatest = () => { logEl.scrollTop = logEl.scrollHeight; follow = true; $("jump").hidden = true }
   function logLine(t, text, cls) {
-    const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 8
     const old = t && new Date(t).getTime() < openedAt
     if (!old && !dividerShown && logEl.childNodes.length) {
       const d = document.createElement("div"); d.className = "divider"; d.textContent = "Earlier activity above · live from here"
@@ -446,14 +619,28 @@
     }
     if (!old) dividerShown = true
     const line = document.createElement("div")
-    if (old) line.className = "old"
+    line.className = (old ? "old " : "") + (cls === "bad" || cls === "warn" ? "p" : "")
     const ts = document.createElement("span"); ts.className = "t"
     ts.textContent = (t ? t.slice(11, 19) : new Date().toTimeString().slice(0, 8)) + "  "
     const msg = document.createElement("span"); if (cls) msg.className = cls; msg.textContent = text
     line.append(ts, msg)
     logEl.append(line)
     while (logEl.childNodes.length > 2000) logEl.firstChild.remove()
-    if (atBottom) logEl.scrollTop = logEl.scrollHeight
+    if (follow) logEl.scrollTop = logEl.scrollHeight
+    else $("jump").hidden = false
+  }
+  let lastTop = 0
+  logEl.addEventListener("scroll", () => {
+    const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 8
+    if (atBottom) { follow = true; $("jump").hidden = true }
+    else if (logEl.scrollTop < lastTop) follow = false   // only the reader scrolls up
+    lastTop = logEl.scrollTop
+  })
+  if (window.ResizeObserver) new ResizeObserver(() => { if (follow) logEl.scrollTop = logEl.scrollHeight }).observe(logEl)
+  $("jump").onclick = toLatest
+  $("problems-only").onchange = (e) => {
+    logEl.classList.toggle("problems", e.target.checked)
+    toLatest()
   }
 
   const seenFinal = new Set()
@@ -475,7 +662,7 @@
         break
       case "run-start":
         currentRun = e.run || ""
-        logLine(e.t, `Started: ${e.docs || 0} document(s), ${e.packets || 0} packet(s)`); break
+        logLine(e.t, `Started: ${e.docs || 0} document(s), ${e.packets || 0} packet(s)`); pollSoon(); break
       case "queued": {
         // In this run. A file that was waiting for a retry starts over.
         const r = row(f)
@@ -533,7 +720,7 @@
       case "build-start": logLine(e.t, "Updating the website…"); break
       case "build-done": logLine(e.t, "Website updated. Refresh the wiki to see the changes.", "ok"); break
       case "build-failed": logLine(e.t, "The website could not be rebuilt; the previous version is still shown", "bad"); break
-      case "run-end": logLine(e.t, `Done: ${e.docs || 0} document(s), ${e.packets || 0} packet(s)`, "ok"); break
+      case "run-end": logLine(e.t, `Done: ${e.docs || 0} document(s), ${e.packets || 0} packet(s)`, "ok"); pollSoon(); break
       case "rerun": logLine(e.t, `${e.count || "More"} file(s) arrived meanwhile; starting again`); break
       case "error": {
         if (f) { const r = row(f); if (!r.final) { r.retry = true; r.note = e.msg || "" } }
@@ -563,7 +750,12 @@
     es.onerror = () => { if (es.readyState === EventSource.CLOSED) reloadForNewToken() }
   }
 
+  let pollTimer = 0, polling = false
+  function pollSoon() { clearTimeout(pollTimer); pollTimer = setTimeout(poll, 300) }
   async function poll() {
+    if (polling) return pollSoon()
+    polling = true
+    clearTimeout(pollTimer)
     try {
       const r = await fetch("/api/status?token=" + encodeURIComponent(TOKEN), { cache: "no-store" })
       if (r.status === 403) reloadForNewToken()
@@ -572,10 +764,24 @@
         const st = $("state")
         const waiting = s.queue.intake.length + s.queue.inbox.length
         runner = s.runner || { running: false }
-        if (runner.running) { st.className = "busy"; st.textContent = "Working" + (runner.since ? " since " + runner.since : "") }
-        else if (waiting) { st.className = "busy"; st.textContent = `${waiting} file(s) waiting to start` }
+        if (runner.running) { st.className = "busy"; st.textContent = "Working" }
+        else if (waiting) { st.className = "busy"; st.textContent = `${waiting} file${waiting === 1 ? "" : "s"} waiting to start` }
         else { st.className = "idle"; st.textContent = "Idle" }
+        $("run-meta").textContent = runner.running && runner.since ? `since ${runner.since}` : ""
         $("process").disabled = runner.running || !waiting
+        // Worth pressing only when files wait and nothing is running.
+        $("process").className = !runner.running && waiting ? "" : "secondary"
+        $("engine").textContent = s.engine === "local" ? "This Mac only" : s.engine === "claude" ? "Claude" : ""
+        $("engine").title = (s.engine === "local" ? "The model on this Mac reads your documents; nothing leaves the Mac."
+          : "Claude reads your documents; the text it reads is sent to Anthropic.") + (s.version ? " Engine " + s.version : "")
+        const parked = (s.needsReview || []).length
+        const note = $("review-note")
+        note.hidden = !parked
+        if (parked) {
+          note.textContent = `${parked} file${parked === 1 ? " was" : "s were"} set aside after failing twice. `
+          const a = document.createElement("a"); a.href = SITE + "/_review"; a.textContent = "Open the Review queue"
+          note.append(a)
+        }
         $("limit").textContent = `Up to ${s.maxUploadMb} MB per file.`
         maxBytes = s.maxUploadMb * 1048576
         for (const p of [...s.queue.intake, ...s.queue.inbox]) row(p)  // also files added outside this page
@@ -583,7 +789,8 @@
         render()
       }
     } catch (_) {}
-    setTimeout(poll, 4000)
+    polling = false
+    pollTimer = setTimeout(poll, 4000)
   }
 
   // ------------------------------------------------------------------ uploads
@@ -627,6 +834,7 @@
       if (xhr.status === 200 && res.ok) {
         const merged = rekey(key, res.file)
         if (merged) setState(merged, "queued")
+        pollSoon()
         if (res.duplicate && merged && merged.key === res.file) {
           // Nothing new was queued; the row now tracks the copy that already was.
           merged.note = "The same file was already queued"
@@ -655,14 +863,22 @@
     }
   }
 
-  const drop = $("drop")
-  ;["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over") }))
-  ;["dragleave", "drop"].forEach((t) => drop.addEventListener(t, () => drop.classList.remove("over")))
-  // A file dropped anywhere else on the page must not make the browser open it.
+  const drop = $("drop"), overlay = $("overlay")
+  // Files can be dropped anywhere on the page (the browser must never open them itself).
+  const hasFiles = (e) => [...(e.dataTransfer && e.dataTransfer.types || [])].includes("Files")
+  let dragDepth = 0
+  window.addEventListener("dragenter", (e) => {
+    if (!hasFiles(e)) return
+    dragDepth++; overlay.hidden = false; drop.classList.add("over")
+  })
+  window.addEventListener("dragleave", () => {
+    if (--dragDepth <= 0) { dragDepth = 0; overlay.hidden = true; drop.classList.remove("over") }
+  })
   window.addEventListener("dragover", (e) => e.preventDefault())
-  window.addEventListener("drop", (e) => e.preventDefault())
-  drop.addEventListener("drop", async (e) => {
+  window.addEventListener("drop", async (e) => {
     e.preventDefault()
+    dragDepth = 0; overlay.hidden = true; drop.classList.remove("over")
+    if (!hasFiles(e)) return
     const items = [...(e.dataTransfer.items || [])]
     const entries = items.map((i) => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean)
     if (entries.length) {

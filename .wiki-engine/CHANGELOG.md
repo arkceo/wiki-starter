@@ -2,6 +2,21 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Upload & Logs is a one-screen dashboard
+- On a laptop screen, everything fits without scrolling:
+  - the state, a large "13 of 14 done" with its progress bar, and the live line;
+  - counts of files in progress, waiting, done and needing attention;
+  - the files and the live log side by side, each scrolling on its own.
+- Files are grouped: in progress first, then needs attention, waiting and done. Click a
+  count to show only those files.
+- The live log has a "Problems only" switch. It keeps following new lines until you
+  scroll up, and a "Latest" button brings it back.
+- Drop files anywhere on the page. The status updates as soon as an upload finishes or a
+  run starts or ends, instead of up to 4 seconds later.
+- The page shows which reader is in use (Claude or This Mac only). Files set aside after
+  failing twice are counted, with a link to the Review queue.
+- In a narrow window, the files and the log share one panel with tabs.
+
 ## Subscription sign-in no longer crashes during install
 - Choosing the Claude subscription sign-in could crash with "EINVAL: invalid argument,
   kqueue". The installer gave Claude Code the terminal through `/dev/tty`, which macOS
