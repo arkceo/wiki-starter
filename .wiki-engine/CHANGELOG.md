@@ -2,6 +2,13 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## A sign-in token pasted over two lines works
+- Claude Code prints the subscription token over two lines in a narrow Terminal window.
+  The installer read only the first line, rejected the token, and the second half then
+  ran as a command. It now joins a paste that arrives as two lines.
+- If a token still does not work, the installer asks for the rest of it, or for the whole
+  token again, up to three tries, instead of stopping.
+
 ## Upload & Logs is a one-screen dashboard
 - On a laptop screen, everything fits without scrolling:
   - the state, a large "13 of 14 done" with its progress bar, and the live line;

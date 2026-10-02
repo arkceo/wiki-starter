@@ -84,14 +84,24 @@ ask() { # VAR "question" "default"
   eval "$1=\$answer"
 }
 
+# A secret typed or pasted at the terminal, with every space and line break removed.
+# A token printed in a narrow window runs over two lines and its paste arrives as two:
+# whatever else arrives within a second of the first line is part of it.
+read_secret() { # "question" -> stdout
+  local answer more
+  printf '  %s: ' "$1" > /dev/tty
+  IFS= read -rs answer < /dev/tty || answer=""
+  while IFS= read -rs -t 1 more < /dev/tty; do answer="$answer$more"; done
+  printf '\n' > /dev/tty
+  printf '%s' "$answer" | tr -d '[:space:]'
+}
+
 ask_secret() { # VAR "question"
   local current answer
   eval "current=\${$1:-}"
   if [ -n "$current" ]; then return 0; fi
   have_tty || { eval "$1=''"; return 0; }
-  printf '  %s: ' "$2" > /dev/tty
-  IFS= read -rs answer < /dev/tty || answer=""
-  printf '\n' > /dev/tty
+  answer=$(read_secret "$2")
   eval "$1=\$answer"
 }
 
@@ -415,7 +425,8 @@ anthropic_signin() {
       local token="${WIKI_OAUTH_TOKEN:-}"
       if [ -z "$token" ]; then
         info "A browser window opens. Sign in, approve, then come back here."
-        info "Claude Code prints a long token starting with sk-ant-oat. Copy it."
+        info "Claude Code prints a long token starting with sk-ant-oat. Copy all of it:"
+        info "in a narrow window it runs over two lines; copy both."
         if have_tty; then
           local term; term=$(terminal_device)
           if ! claude setup-token < "$term" > "$term" 2>&1; then
@@ -428,7 +439,17 @@ anthropic_signin() {
         ask_secret token "Paste the token (it stays hidden)"
       fi
       [ -n "$token" ] || die "No token entered."
-      check_oauth_token "$token" || die "That token did not work. Run the installer again and paste the whole token."
+      # A token cut off at a line break gets its second half; a new whole token replaces it.
+      local tries=1 more
+      until check_oauth_token "$token"; do
+        if [ "$tries" -ge 3 ] || [ -n "${WIKI_OAUTH_TOKEN:-}" ] || ! have_tty; then
+          die "That token did not work. Run the installer again and paste the whole token."
+        fi
+        tries=$((tries + 1))
+        warn "That token did not work. If it was cut off, paste the rest of it;"
+        more=$(read_secret "otherwise paste the whole token again")
+        case "$more" in sk-ant-*) token="$more" ;; *) token="$token$more" ;; esac
+      done
       keychain_del anthropic-api-key
       keychain_put claude-oauth-token "$token" || die "Could not save the token in the Keychain."
       ok "subscription sign-in stored in the Keychain"
