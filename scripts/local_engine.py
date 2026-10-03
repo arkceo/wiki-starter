@@ -64,6 +64,7 @@ each step (loading the model, each question, writing, filing) to its live line, 
 model's answer streamed so the line can count the words as they arrive.
 """
 import argparse
+import concurrent.futures
 import datetime
 import filecmp
 import hashlib
@@ -86,6 +87,8 @@ WIKI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(WIKI_DIR, "scripts"))
 import local_facts as F  # noqa: E402
 import local_pages as LP  # noqa: E402
+import wiki_claude  # noqa: E402
+import wiki_review  # noqa: E402
 import wiki_events  # noqa: E402
 import wiki_netguard  # noqa: E402
 from local_pages import clean_line, esc, label, owner_text, raw_link, yq  # noqa: E402,F401
@@ -856,7 +859,7 @@ def projects():
     out = []
     root = os.path.join(WIKI_DIR, "raw")
     for d in sorted(os.listdir(root)) if os.path.isdir(root) else []:
-        if os.path.isdir(os.path.join(root, d)) and d not in IGNORED_DIRS and not d.startswith("."):
+        if os.path.isdir(os.path.join(root, d)) and d not in IGNORED_DIRS and not d.startswith((".", "_")):
             out.append(d)
     if "general" not in out:
         out.append("general")
@@ -866,6 +869,9 @@ def projects():
 class Run:
     current = ""      # the file being worked on, for events
     company = ""      # the business's own company (wiki.config.json "company")
+    reader = "local"  # "claude": the fast pipeline, Claude reads (scripts/wiki_claude.py)
+    lanes = 1         # documents read at once
+    cap = 0.0         # the fast pipeline's spending cap for one batch (maxSpendPerBatchUsd)
     doc_budget = DOC_BUDGET_SECONDS
     prose_budget = PROSE_BUDGET_SECONDS
 
@@ -892,7 +898,9 @@ def review(project, page, reason, lines):
     if first and first in text_:
         return  # already queued (a retry of the same file)
     text_ += f"\n## [{today()}] needs-review | {label(project, 60)} | {label(page, 160)} | {label(reason, 160)}\n"
-    text_ += "".join(f"- {esc(l, 600)}\n" for l in lines)
+    # A review item's id is ours, not a document's: it stays code, as the runner writes it.
+    text_ += "".join(f"- {l}\n" if re.fullmatch(r"Review item: `RV-[A-Za-z0-9-]+`", l) else f"- {esc(l, 600)}\n"
+                     for l in lines)
     write(path, text_)
     wiki_events.emit("review", file=Run.current, page=path)
 
@@ -1251,13 +1259,19 @@ def topic_match(title, existing):
     return best if score >= 0.67 else None
 
 
-def ask_topics(model, sysmsg, d, wiki, proj_list, pre):
+def topic_choices(wiki):
+    """The topic pages a document can add to: the wiki's own, then the usual ones it does
+    not have yet. (existing, choices, titles)."""
     existing = wiki.topics()[:80]
     have = {slugify(t) for _, t in existing}
     choices = [(rel, t, rel.split("/")[1]) for rel, t in existing]
     choices += [(None, t, sec) for sec, t in TOPICS if slugify(t) not in have
                 and not topic_match(t, existing)]
-    titles = list(dict.fromkeys(t for _, t, _ in choices))
+    return existing, choices, list(dict.fromkeys(t for _, t, _ in choices))
+
+
+def ask_topics(model, sysmsg, d, wiki, proj_list, pre):
+    existing, choices, titles = topic_choices(wiki)
     say("ask", "choosing the topic pages it adds to")
     listing = "\n".join(f"- {t} ({SECTIONS[sec]})" for _, t, sec in choices)
     q = ((pre or f"Document: {d['title']}\n" + "\n".join(f"- {s}" for s in d["summary"]) + "\n\n")
@@ -1268,6 +1282,13 @@ def ask_topics(model, sysmsg, d, wiki, proj_list, pre):
          "document that belong on that page, each a full sentence that names what it is about."
          + ("\n\nAlso choose its project folder: 'general' unless one clearly fits." if len(proj_list) > 1 else ""))
     a = ask_safe(model, sysmsg, q, topics_schema(titles, proj_list), 1200, "topics")
+    return settle_topics(a, d, wiki, existing, choices, proj_list)
+
+
+def settle_topics(a, d, wiki, existing, choices, proj_list):
+    """The topic pages and project folder from an answer, with the points the document
+    contains, an existing page for a title it (nearly) has, and never a page that is the
+    document itself."""
     nums = F.numbers_in(d["_body"])
     out = []
     for t in a.get("topics") or []:
@@ -1369,6 +1390,292 @@ def process_document(model, wiki, claims, src, sysmsg, touched):
     log(f"filed {src} -> {dest}" + (f" ({d['dropped']} figure(s) not in the document left out)" if d["dropped"] else ""))
     log_line("intake", project, d["title"] or name)
     return True
+
+
+# ============================================================== Claude reads =====
+# The fast pipeline (engine "claude" with "pipeline": "fast"): Claude answers every question
+# about a document in one call (scripts/wiki_claude.py), many documents at once. What
+# follows the answer is the same as for the model on this Mac: grounding, the claims, the
+# contradictions, the pages and the filing are code.
+CLAUDE_DOC_CHARS = 150000   # about 40k tokens; a longer document is read from its start
+MAX_FAILED_IN_A_ROW = 5     # documents failing one after another: Claude, not the documents
+IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp"}
+LOOK_NOTES = {"scanned-no-ocr", "image-no-ocr", "image-little-text", "heic-not-converted"}
+
+
+class ClaudeModel:
+    """Claude behind the Model interface, so the questions the code asks one at a time (the
+    figures on a page a person wrote, a page's overview) go to Claude too."""
+
+    def __init__(self, cfg):
+        self.claude = wiki_claude.Claude(model=cfg.get("model") or "", budget=float(cfg.get("budget") or 2.5),
+                                         timeout=float(cfg.get("timeout") or 900))
+        self.deadline = None
+        self.stats = self.claude.stats
+
+    def ask(self, system, user, schema, max_tokens=1500, read_dirs=()):
+        try:
+            return self.claude.ask(system, user, schema, read_dirs=read_dirs)
+        except wiki_claude.ClaudeUnavailable as e:
+            raise ModelUnavailable(f"Claude could not run: {e}")
+
+    def stop(self):
+        self.claude.stop()
+
+
+def extract_schema(titles, proj_list):
+    return obj({
+        "title": text(160), "doc_type": S("string", enum=DOC_TYPES), "doc_date": text(10),
+        "summary": S("array", items=text(300)),
+        "decisions": S("array", items=obj({"title": text(90), "decision": text(300), "date": text(10)})),
+        "obligations": S("array", items=text(240)),
+        "open_questions": S("array", items=text(300)),
+        "parties": S("array", items=obj({"name": text(120), "kind": S("string", enum=KINDS), "role": text(160)})),
+        "figures": S("array", items=obj({"about": text(120), "attribute": S("string", enum=F.ATTRIBUTES),
+                                          "qualifier": text(100), "value": text(120)})),
+        "identifiers": S("array", items=obj({"entity": text(120), "kind": S("string", enum=ID_KINDS),
+                                              "value": text(80)})),
+        "relations": S("array", items=obj({"subject": text(120), "relation": S("string", enum=LP.RELATIONS),
+                                            "object": text(120)})),
+        "topics": S("array", items=obj({"page": S("string", enum=titles + ["new"]),
+                                         "section": S("string", enum=list(SECTIONS)), "title": text(80),
+                                         "points": S("array", items=text(240))})),
+        "project": S("string", enum=proj_list),
+        "photo": text(1500),
+    })
+
+
+Q_EXTRACT = """Read the whole document above and answer every part.
+
+- title: as a reader would name it, with its number if it has one. doc_type. doc_date: YYYY-MM-DD, empty if it has none.
+- summary: up to 10 points that carry the key names, amounts and dates. decisions it records (a short title, the decision in one sentence, its date); obligations it sets (who must do what, by when); open_questions it leaves.
+- parties: every company, organisation, person and product or service it names, and each place that matters to the business (a site, an outlet, an office). The name exactly as written (a company's full legal name when the document gives it; a person's name without Mr or Ms), its kind, and its role in this document: supplier, buyer, customer, landlord, tax agent, director, signatory, contact, product bought, ...
+- figures: every amount, price, fee, quantity, percentage, date, deadline, duration, rate and address it states, one entry per figure, table rows included. about: one of your party names exactly as you wrote it, or "this document" for the document's own numbers, totals and dates. attribute: what kind of figure it is (payment_terms is only the time a buyer has to pay; a notice to end or change something is notice_period; how long an agreement runs is contract_term; a charge for a service is fee). qualifier: a few words saying exactly what it is for. value: copied exactly as written, with its currency or unit.
+- identifiers: registered names, company or registration numbers, tax numbers (TIN, SST, GST), licence numbers and bank account numbers: the party they belong to (entity: one of your party names) and the value copied exactly.
+- relations: the relationships between your parties that the document states: a person's place at a company (director_of, employee_of, signatory_for, contact_for), how companies deal with each other (supplier_of, customer_of, landlord_of, tenant_of, adviser_to, bank_of, ...), who supplies a product (supplier_of). Names exactly as in your parties list.
+- topics: up to three of these topic pages of the business's wiki that the document has something to say about, each with up to 4 points from it that belong on that page, each a full sentence that names what it is about:
+{listing}
+  Answer "new" (with a short title and its section) only for a subject none of these covers and a business keeps one page on; never a page for this one document, a company, a person or a product.
+- project: its project folder, one of: {projects}. "general" unless one clearly fits.
+- photo: only when the document is a photo or picture: a plain, factual description of what it shows (the scene or place, objects, products, equipment, quantities, condition, any documents or screens in view, any text, quoted). Describe people and never name anyone from their face: a name may come only from text in the picture. Empty for any other document.
+
+Report only what the document states and leave a field empty when it does not say. Never guess and never add outside knowledge."""
+
+LOOK_AT = ("\nThe text above was converted from a photo or a scan and may be incomplete or garbled. Look at "
+           "the original with the Read tool: {path} (read only that file), and answer from what you see.\n")
+
+
+def claude_read(model, src, sysmsg, listing, titles, proj_list):
+    """Claude's one answer about one document. Runs in a worker thread: it reads files and
+    asks, and never writes anything."""
+    name = os.path.basename(src)
+    mirror = mirror_path(src)
+    if not os.path.isfile(os.path.join(WIKI_DIR, mirror)):
+        return {"src": src, "skip": "not converted yet"}
+    if Run.cap and model.claude.spent() >= Run.cap:
+        return {"src": src, "skip": f"the batch reached its spending cap (${Run.cap:g})", "capped": True}
+    fm, body = split_frontmatter(read(mirror))
+    method, note = fm_get(fm, "method"), fm_get(fm, "note")
+    ext = os.path.splitext(name)[1].lower()
+    picture = ext in IMAGE_EXT
+    look = picture or note in LOOK_NOTES or not body.strip()
+    if method == "ERROR" and not (picture or ext == ".pdf"):
+        return {"src": src, "unreadable": f"conversion said {method} {note}".strip()}
+    target = os.path.join(WIKI_DIR, src)
+    preview = fm_get(fm, "preview")
+    if preview and os.path.isfile(os.path.join(WIKI_DIR, "cache", "md", preview)):
+        target = os.path.join(WIKI_DIR, "cache", "md", preview)   # a HEIC photo's JPEG copy
+    truncated = len(body) > CLAUDE_DOC_CHARS
+    user = (f"Document file name: {name}\n<document>\n{body[:CLAUDE_DOC_CHARS]}\n</document>\n"
+            + (f"\nOnly the start of this long document is shown ({CLAUDE_DOC_CHARS} characters).\n" if truncated else "")
+            + (LOOK_AT.format(path=target) if look else "")
+            + "\n" + Q_EXTRACT.format(listing=listing, projects=", ".join(proj_list)))
+    wiki_events.emit("read", file=src)
+    log(f"reading {src} (Claude)")
+    schema, dirs = extract_schema(titles, proj_list), [os.path.dirname(target)] if look else ()
+    a = model.ask(sysmsg, user, schema, read_dirs=dirs)
+    if not (a.get("summary") or a.get("parties") or a.get("figures") or a.get("photo")) and len(body.strip()) > 200:
+        # An answer with nothing in it, for a document with text: it happens now and then
+        # (a large table), and a second ask nearly always gets the real answer.
+        log(f"{src}: Claude's answer was empty; asking again")
+        a = model.ask(sysmsg, user, schema, read_dirs=dirs)
+    return {"src": src, "answer": a, "body": body, "truncated": truncated, "picture": picture,
+            "taken": fm_get(fm, "taken")}
+
+
+def claude_document(model, wiki, claims, got, sysmsg, touched):
+    """Claude's answer about one document, checked and written like the local model's."""
+    src = got["src"]
+    Run.current = src
+    name = os.path.basename(src)
+    if got.get("skip"):
+        log(f"{src}: {got['skip']}; left for the next run")
+        return False
+    if got.get("unreadable"):
+        review("general", src, "could not be read", [
+            f"{name}: {got['unreadable']}. It stays in the queue; check that it opens."])
+        return False
+    a, body = got["answer"], got["body"]
+    photo = clean_line(a.get("photo"), 1500) if got.get("picture") or not body.strip() else ""
+    parties = merge_parties(clean_parties(a.get("parties")))
+
+    def ref(x):
+        """One of the document's parties, by any spelling the answer used for it."""
+        n = norm_full(x)
+        if not n:
+            return None
+        for p in parties:
+            if n == norm_full(p["name"]) or any(n == norm_full(v) for v in p.get("variants", [])):
+                return p["name"]
+        hits = [p["name"] for p in parties if p["kind"] == "company" and same_entity(x, p["name"])]
+        return hits[0] if len(hits) == 1 else None
+
+    figures = []
+    for f in a.get("figures") or []:
+        if isinstance(f, dict):
+            about = THIS_DOC if norm_full(f.get("about")) in ("", norm_full(THIS_DOC)) else ref(f.get("about"))
+            figures.append(dict(f, about=about or THIS_DOC))
+    ids = [dict(i, entity=ref(i.get("entity"))) for i in a.get("identifiers") or []
+           if isinstance(i, dict) and ref(i.get("entity"))]
+    overview = {k: a.get(k) for k in ("title", "doc_type", "doc_date", "summary", "decisions", "obligations",
+                                      "open_questions")}
+    # A photo's summary may say what the picture shows; its figures must still be in its text.
+    d = merge_parts([{"overview": overview, "parties": parties, "figures": [], "identifiers": ids}],
+                    body + ("\n" + photo if photo else ""))
+    checked = merge_parts([{"overview": {}, "parties": [], "figures": figures, "identifiers": []}], body)
+    d["figures"], d["dropped"] = checked["figures"], checked["dropped"]
+    d["_body"], d["_name"], d["photo"] = body, os.path.splitext(name)[0], photo
+    d["taken"] = clean_line(got.get("taken"), 20) if photo else ""
+    if d["doc_type"] not in DECISION_TYPES or not DECISION_CUE.search(body):
+        d["decisions"] = []
+    names = named(d["parties"])
+    rels, seen = [], set()
+    for r in a.get("relations") or []:
+        if not isinstance(r, dict) or r.get("relation") not in LP.RELATIONS:
+            continue
+        s_, o_ = ref(r.get("subject")), ref(r.get("object"))
+        if s_ and o_ and s_ != o_ and s_ in names and o_ in names and (s_, r["relation"], o_) not in seen:
+            seen.add((s_, r["relation"], o_))
+            rels.append({"subject": s_, "relation": r["relation"], "object": o_})
+    d["relations"] = rels
+    d["relations"] += role_relations(d)
+    d["relations"] = [r for r in d["relations"] if F.relation_stated(r["relation"], body) and (
+        Run.company and (same_entity(Run.company, r["subject"]) or same_entity(Run.company, r["object"]))
+        or share_a_row(r["subject"], r["object"], body))]
+    existing, choices, _ = topic_choices(wiki)
+    d["topics"], project = settle_topics({"topics": a.get("topics"), "project": a.get("project")}, d, wiki,
+                                         existing, choices, projects())
+    for t in d["topics"]:   # a usual topic an earlier document of this run has just created
+        if not t["rel"]:
+            t["rel"] = topic_match(t["title"], wiki.topics())
+    dest = choose_dest(f"raw/{project}", name, src)
+    model.deadline = time.time() + Run.doc_budget
+    try:
+        plan = plan_document(model, wiki, claims, sysmsg, d, dest, body)
+    finally:
+        model.deadline = None
+    say("write", "writing its pages")
+    write_document(wiki, claims, src, dest, project, d, plan, got.get("truncated"), 1, touched)
+    say("file", f"filing it in {os.path.dirname(dest)}")
+    place(src, dest)
+    m_src, m_dest = os.path.join(WIKI_DIR, mirror_path(src)), os.path.join(WIKI_DIR, mirror_path(dest))
+    if os.path.isfile(m_src) and not os.path.exists(m_dest):   # its text goes with it: no second conversion
+        os.makedirs(os.path.dirname(m_dest), exist_ok=True)
+        os.replace(m_src, m_dest)
+    wiki_events.emit("filed", file=src, to=dest)
+    log(f"filed {src} -> {dest}" + (f" ({d['dropped']} figure(s) not in the document left out)" if d["dropped"] else ""))
+    log_line("intake", project, d["title"] or name)
+    return True
+
+
+def read_with_claude(model, wiki, claims, docs, sysmsg, touched):
+    """Every document: Claude reads up to Run.lanes at once; each answer is checked and
+    written as soon as it arrives, one at a time. The first document is read alone, so a
+    sign-in that does not work stops the run after one call. True if no file failed."""
+    ok = True
+    existing, choices, titles = topic_choices(wiki)
+    listing = "\n".join(f"- {t} ({SECTIONS[sec]})" for _, t, sec in choices)
+    proj_list = projects()
+    total = len(docs)
+
+    failed_in_a_row, capped = 0, False
+
+    def answer(fut):
+        """A finished read's answer, or the exception it ended with."""
+        try:
+            return fut.result()
+        except ModelUnavailable:
+            raise
+        except Exception as e:
+            return e
+
+    def handle(src, got):
+        """One document's answer (or the exception its read ended with): checked and
+        written. Returns True if Claude was asked."""
+        nonlocal ok, failed_in_a_row, capped
+        Run.current = src
+        if isinstance(got, Exception):  # one bad file never stops the others ...
+            e = got
+            ok = False
+            failed_in_a_row += 1
+            log(f"{src}: {e}")
+            wiki_events.emit("error", file=src, msg=f"{os.path.basename(src)}: {e}")
+            if failed_in_a_row >= MAX_FAILED_IN_A_ROW:
+                # ... but Claude failing document after document is Claude, not the files.
+                raise ModelUnavailable(f"Claude failed {failed_in_a_row} documents in a row; the last: {e}")
+            return True
+        if got.get("capped") and not capped:
+            capped = True
+            log(f"stopped at its spending cap (${Run.cap:g}); the documents not read yet wait for the next run")
+        asked = "answer" in got
+        if asked:
+            failed_in_a_row = 0
+        try:
+            if not claude_document(model, wiki, claims, got, sysmsg, touched) and not got.get("skip"):
+                ok = False
+        except ModelUnavailable:
+            raise
+        except Exception as e:
+            ok = False
+            log(f"{src}: {e}")
+            wiki_events.emit("error", file=src, msg=f"{os.path.basename(src)}: {e}")
+        return asked
+
+    # Alone until one document has really been put to Claude: a sign-in that does not work
+    # stops the run after that one call.
+    rest, done = list(docs), 0
+    while rest:
+        src = rest.pop(0)
+        done += 1
+        Run.current = src
+        say("read", "Claude is reading the first document", n=done, of=total)
+        try:
+            got = claude_read(model, src, sysmsg, listing, titles, proj_list)
+        except ModelUnavailable:
+            raise
+        except Exception as e:
+            got = e
+        if handle(src, got):
+            break
+    if not rest:
+        return ok
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=Run.lanes)
+    try:
+        futs = {pool.submit(claude_read, model, src, sysmsg, listing, titles, proj_list): src for src in rest}
+        waiting = set(futs)
+        while waiting:
+            Run.current = ""
+            say("read", f"Claude is reading {min(Run.lanes, len(waiting))} documents at once", n=done, of=total)
+            finished, waiting = concurrent.futures.wait(waiting, timeout=30,
+                                                        return_when=concurrent.futures.FIRST_COMPLETED)
+            for fut in finished:
+                done += 1
+                handle(futs[fut], answer(fut))
+    except ModelUnavailable:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
+    return ok
 
 
 # The label a document prints just before an identifier decides what it is; the model's
@@ -1681,16 +1988,63 @@ def write_document(wiki, claims, src, dest, project, d, plan, truncated, n_parts
         else:
             outcome = (f"The page still shows {old['value']}: {source_name(new)} is "
                        + ("older." if new.get("doc_date") else "undated."))
-        review(project, new["page"], "a new document disagrees with an existing page", [
-            f"{page_title} — {what}: {old['value']} ({dated(old)}) against {new['value']} ({dated(new)}).",
-            outcome + " Confirm which is right."])
+        lines = [f"{page_title} — {what}: {old['value']} ({dated(old)}) against {new['value']} ({dated(new)}).",
+                 outcome + " Confirm which is right."]
+        if Run.reader == "claude":
+            lines.append(f"Review item: `{conflict_item(project, new, old, page_title, what, dated)}`")
+        review(project, new["page"], "a new document disagrees with an existing page", lines)
     flagged = {r["page"] for _, r in plan["conflicts"]}
     for x, line in plan["notes"]:
         if x["rel"] not in flagged:  # a figure already flagged on this page says enough
             review(project, x["rel"], "a new document disagrees with an existing page", [line])
     if truncated:
         review(project, summary_rel, "long document only partly read",
-               [f"{os.path.basename(dest)} has more than {MAX_PARTS} parts; only the first were read."])
+               [f"{os.path.basename(dest)} is long; only its start was read." if Run.reader == "claude"
+                else f"{os.path.basename(dest)} has more than {MAX_PARTS} parts; only the first were read."])
+
+
+def conflict_item(project, new, old, page_title, what, dated):
+    """The contradiction as a question in the Upload page's Review tab, which the owner (or
+    Jev, in Auto-review) answers with one click. Returns its id."""
+    newer = F.Claims.order(new) >= F.Claims.order(old)
+    context = clean_line(f"{source_name(old)} ({old.get('source')}, {dated(old)}) says {old['value']}; "
+                         f"{source_name(new)} ({new.get('source')}, {dated(new)}) says {new['value']}.", 1200)
+    for folder in (wiki_review.OPEN, wiki_review.DONE):   # the same question again (a retried document)
+        try:
+            names = [n for n in os.listdir(folder) if n.endswith(".json")]
+        except OSError:
+            continue
+        for n in names:
+            try:
+                with open(os.path.join(folder, n), encoding="utf-8") as f:
+                    if json.load(f).get("context") == context:
+                        return n[:-5]
+            except (OSError, ValueError, AttributeError):
+                continue
+    iid = wiki_review.new_id(f"{page_title} {what}")
+    item = {
+        "id": iid, "created": today(), "kind": "contradiction", "file": new.get("source") or "",
+        "question": clean_line(f"{page_title}: which {what} is right now?", 400),
+        "context": context,
+        "pages": [new["page"]],
+        "options": [
+            {"key": "A", "label": clean_line(new["value"], 200),
+             "effect": clean_line(f"The page shows {new['value']} as the current {what}, from {source_name(new)}; "
+                                  f"{old['value']} stays as the previous value.", 400)},
+            {"key": "B", "label": clean_line(old["value"], 200),
+             "effect": clean_line(f"The page keeps {old['value']} as the current {what}; {source_name(new)} is "
+                                  "noted as disagreeing.", 400)},
+            {"key": "C", "label": "Both are right: they apply to different things", "auto": False,
+             "effect": "Both values stay on the page, each with what it applies to."},
+        ],
+        "recommended": "A" if newer else "B",
+    }
+    try:
+        wiki_review.write_json(os.path.join(wiki_review.OPEN, iid + ".json"), item)
+        wiki_events.emit("review-item", id=iid, question=item["question"], file=new.get("source") or "")
+    except OSError as e:
+        log(f"review item for {page_title} not written: {e}")
+    return iid
 
 
 BANKISH = re.compile(r"\bbank\b|\bbanking\b|maybank|\bcimb\b|\brhb\b|ambank|\bocbc\b|\bhsbc\b|\buob\b|\baffin\b|\bbsn\b", re.I)
@@ -1715,11 +2069,16 @@ def summary_page(wiki, d, dest, project, title, plan, rels, decisions, truncated
     if d["doc_date"]:
         lines.append(f"doc_date: {yq(d['doc_date'])}")
     lines += ["engine: local", "---", ""]
-    lines.append(f"> Summary of {raw_link(dest)} written by the model on this Mac. Every figure on this page "
+    who = "from Claude's reading" if Run.reader == "claude" else "by the model on this Mac"
+    lines.append(f"> Summary of {raw_link(dest)} written {who}. Every figure on this page "
                  "was found in the document; check the original before relying on one.")
     lines.append("")
     if d["summary"]:
         lines += ["## Summary", ""] + [f"- {esc(s)}" for s in d["summary"]] + [""]
+    if d.get("photo"):
+        lines += ["## What the photo shows", "", esc(d["photo"], 1500), ""]
+        if d.get("taken"):
+            lines += [f"Taken {esc(d['taken'], 20)}.", ""]
     rel_of = {norm_full(v): x["rel"] for x in plan["parties"] for v in x["p"].get("variants", []) + [x["p"]["name"]]}
     if d["figures"]:
         lines += ["## Key facts", "", "| Fact | About | Value |", "|---|---|---|"]
@@ -1750,7 +2109,8 @@ def summary_page(wiki, d, dest, project, title, plan, rels, decisions, truncated
     if d["topics"]:
         lines += ["## Topics", ""] + [f"- {link(t['rel'])}" for t in d["topics"]] + [""]
     if truncated:
-        lines += [f"_Only the first {n_parts} parts of this long document were read._", ""]
+        lines += ["_Only the start of this long document was read._" if Run.reader == "claude"
+                  else f"_Only the first {n_parts} parts of this long document were read._", ""]
     return "\n".join(lines)
 
 
@@ -2200,38 +2560,70 @@ def link_names(wiki, rel):
     return names
 
 
+def overview_for(model, sysmsg, wiki, rel, kind, title, ctx):
+    """The model's 2 to 4 sentences for the top of one page, only those whose numbers are
+    in what it was given, linked to the pages they name; None if it gave none."""
+    what = ("explain this topic for the business, from the points its documents make; each point names its "
+            "document and date, figures from different documents are never combined into one statement, and "
+            "where two points disagree the newer document's holds (give the older value only as what it was)"
+            if kind == "topic" else "say who or what this is for the business and what currently holds")
+    a = model.ask(sysmsg, f"Write 2 to 4 short sentences for the top of the wiki page \"{title}\": {what}. "
+                  "Use only the information below and add nothing else. Keep names, amounts and dates "
+                  "exactly as given. Where a value changed, give the current one and what it was before.\n\n"
+                  + ctx, PROSE_SCHEMA, max_tokens=500)
+    nums = F.numbers_in(ctx)
+    keep = [s for s in (a.get("sentences") or []) if clean_line(s) and not F.ungrounded_numbers(s, nums)]
+    if not keep:
+        return None
+    names = link_names(wiki, rel)
+    return " ".join(LP.linked(s, names, 600) for s in keep)
+
+
 def refresh(model, wiki, claims, sysmsg, touched):
     """A short overview, written by the model from what is recorded, on every page this
     run touched; code rebuilds the rest of each page's block. A failure leaves a page's
-    previous overview in place and never fails the run."""
+    previous overview in place and never fails the run. With Claude (Run.lanes > 1) the
+    overviews are asked for all at once, Run.lanes at a time."""
     items = [(r, k) for r, k in touched.items() if os.path.exists(os.path.join(WIKI_DIR, r))]
     Run.current = ""
-    for n, (rel, kind) in enumerate(items, 1):
-        title = wiki.pages.get(rel, {}).get("title") or rel
+    contexts = {}
+    for rel, kind in items:
         engine_topic = kind != "topic" or wiki.pages.get(rel, {}).get("engine")
         try:
-            ctx = prose_context(wiki, claims, rel, kind) if engine_topic else ""
+            contexts[rel] = prose_context(wiki, claims, rel, kind) if engine_topic else ""
         except Exception as e:
             log(f"overview of {rel} skipped: {e}")
-            ctx = ""
-        overview = None
-        if ctx:
+            contexts[rel] = ""
+    ready, stopped = {}, False
+    if Run.cap and isinstance(model, ClaudeModel) and model.claude.spent() >= Run.cap:
+        log(f"overviews left as they are: the batch reached its spending cap (${Run.cap:g})")
+        stopped = True
+    elif Run.lanes > 1:
+        asked = [(rel, kind) for rel, kind in items if contexts[rel]]
+        say("write", f"Claude is writing the overviews of {len(asked)} pages, {Run.lanes} at a time")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=Run.lanes) as pool:
+            futs = {pool.submit(overview_for, model, sysmsg, wiki, rel, kind,
+                                wiki.pages.get(rel, {}).get("title") or rel, contexts[rel]): rel for rel, kind in asked}
+            for n, fut in enumerate(concurrent.futures.as_completed(futs), 1):
+                rel = futs[fut]
+                try:
+                    ready[rel] = fut.result()
+                except ModelUnavailable as e:
+                    if not stopped:
+                        log(f"overviews stopped: {e}")
+                    stopped = True
+                except Exception as e:
+                    log(f"overview of {rel} skipped: {e}")
+                say("write", "writing the page overviews", n=n, of=len(asked))
+    for n, (rel, kind) in enumerate(items, 1):
+        title = wiki.pages.get(rel, {}).get("title") or rel
+        ctx = contexts[rel]
+        overview = ready.get(rel)
+        if ctx and Run.lanes <= 1 and not stopped:
             say("write", f"writing the overview of {clean_line(title, 50)}", n=n, of=len(items))
-            what = ("explain this topic for the business, from the points its documents make; each point names its "
-                    "document and date, figures from different documents are never combined into one statement, and "
-                    "where two points disagree the newer document's holds (give the older value only as what it was)"
-                    if kind == "topic" else "say who or what this is for the business and what currently holds")
             model.deadline = time.time() + Run.prose_budget
             try:
-                a = model.ask(sysmsg, f"Write 2 to 4 short sentences for the top of the wiki page \"{title}\": {what}. "
-                              "Use only the information below and add nothing else. Keep names, amounts and dates "
-                              "exactly as given. Where a value changed, give the current one and what it was before.\n\n"
-                              + ctx, PROSE_SCHEMA, max_tokens=500)
-                nums = F.numbers_in(ctx)
-                keep = [s for s in (a.get("sentences") or []) if clean_line(s) and not F.ungrounded_numbers(s, nums)]
-                if keep:
-                    names = link_names(wiki, rel)
-                    overview = " ".join(LP.linked(s, names, 600) for s in keep)
+                overview = overview_for(model, sysmsg, wiki, rel, kind, title, ctx)
             except (ModelUnavailable, DocTimeout) as e:
                 log(f"overviews stopped: {e}")
                 break
@@ -2316,7 +2708,7 @@ def load_config():
         return {}
 
 
-def run(server=None, only_docs=None, packets_only=False):
+def run(server=None, only_docs=None, packets_only=False, reader="local"):
     docs = [] if packets_only else pending("raw/_intake")
     if only_docs is not None:
         docs = [d for d in docs if d in only_docs]
@@ -2329,14 +2721,39 @@ def run(server=None, only_docs=None, packets_only=False):
     Run.doc_budget = float(cfg.get("docBudgetSeconds") or DOC_BUDGET_SECONDS)
     Run.prose_budget = float(cfg.get("proseBudgetSeconds") or PROSE_BUDGET_SECONDS)
     sysmsg = system_prompt(house_rules())
-    wiki_events.emit("claude-start", label="local")
+    Run.reader = reader
+    if reader == "claude":
+        # The fast pipeline: settings under "fast" in wiki.config.json; by default Claude
+        # reads three documents for every batch the classic path would read at once.
+        fast = config.get("fast") or {}
+        try:
+            Run.lanes = int(fast.get("lanes") or 3 * int(config.get("parallelBatches") or 3))
+        except (TypeError, ValueError):
+            Run.lanes = 9
+        Run.lanes = max(1, min(Run.lanes, 18))
+        # The batch's spending cap, as for a classic batch: no new call starts once Claude's
+        # reported cost reaches it; one call may spend at most the smaller of it and $2.50.
+        cap = config.get("maxSpendPerBatchUsd", config.get("maxSpendPerRunUsd", 5))
+        Run.cap = float(cap) if isinstance(cap, (int, float)) and cap > 0 else 5.0
+        chosen = str(fast.get("model") or "sonnet")   # "default": whatever Claude itself defaults to
+        model = ClaudeModel({"model": "" if chosen == "default" else chosen, "budget": min(Run.cap, 2.5)})
+        if Run.company:
+            sysmsg += (f"\n\nThis wiki belongs to {Run.company}: when a document names it, that is the "
+                       "business itself.")
+    else:
+        Run.lanes = 1
+        model = Model(url=server, cfg=cfg)
+    label_ = "fast" if reader == "claude" else "local"
+    wiki_events.emit("claude-start", label=label_)
     t0 = time.time()
     ok = True
-    model = Model(url=server, cfg=cfg)
     claims = F.Claims(os.path.join(WIKI_DIR, "archive", "claims.jsonl"))
     touched = {}
     try:
         wiki = Wiki()
+        if reader == "claude":
+            ok = read_with_claude(model, wiki, claims, docs, sysmsg, touched)
+            docs = []
         for kind, items, fn in (("document", docs, process_document), ("packet", packets, process_packet)):
             for src in items:
                 try:
@@ -2357,16 +2774,22 @@ def run(server=None, only_docs=None, packets_only=False):
             log(f"overviews skipped: {e}")
     except ModelUnavailable as e:
         log(str(e))
-        wiki_events.emit("claude-end", label="local", ok=False, detail=str(e))
+        wiki_events.emit("claude-end", label=label_, ok=False, detail=str(e))
         return 2
     finally:
         model.stop()
         claims.save()
     stats = model.stats
     secs = round(time.time() - t0)
-    wiki_events.emit("claude-end", label="local", ok=True, turns=stats["calls"], cost=0,
-                     detail=f"{secs}s, {stats['prompt_tokens']} tokens read, "
-                            f"{stats['completion_tokens']} written")
+    if reader == "claude":
+        wiki_events.emit("claude-end", label=label_, ok=True, turns=stats["calls"],
+                         cost=round(stats["cost"], 4) if stats["costed"] else None,
+                         detail=f"{secs}s, {stats['calls']} Claude calls, {Run.lanes} at a time"
+                                + (f", {stats['failed']} failed" if stats["failed"] else ""))
+    else:
+        wiki_events.emit("claude-end", label=label_, ok=True, turns=stats["calls"], cost=0,
+                         detail=f"{secs}s, {stats['prompt_tokens']} tokens read, "
+                                f"{stats['completion_tokens']} written")
     log(f"done in {secs}s: {stats}")
     return 0 if ok else 1
 
@@ -2394,6 +2817,8 @@ def main(argv=None):
     ap.add_argument("--server", help="use this llama-server URL instead of starting one")
     ap.add_argument("--docs", help="run: only the documents listed in this file, no packets")
     ap.add_argument("--packets", action="store_true", help="run: only the Update Packets")
+    ap.add_argument("--reader", choices=["local", "claude"], default="local",
+                    help="run: who reads the documents; claude is the fast pipeline (scripts/wiki_claude.py)")
     a = ap.parse_args(argv)
     wiki_netguard.install()
     os.chdir(WIKI_DIR)
@@ -2404,7 +2829,7 @@ def main(argv=None):
     if a.docs:
         with open(a.docs, encoding="utf-8") as f:
             only_docs = {line.strip() for line in f if line.strip()}
-    return run(server, only_docs=only_docs, packets_only=a.packets)
+    return run(server, only_docs=only_docs, packets_only=a.packets, reader=a.reader)
 
 
 if __name__ == "__main__":

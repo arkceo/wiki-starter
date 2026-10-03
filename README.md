@@ -69,6 +69,23 @@ If macOS shows **Background Items Added**, leave it allowed.
   the same time, and 20 at a time with the model on this Mac. Documents are converted to
   text ahead of the reading, and the site is refreshed every few minutes, so the first
   pages appear while the rest are still being read.
+- **Fast reading** (the default with Claude; Settings → Reading speed): Claude reads many
+  documents at once, one question each, and the wiki engine checks every answer against
+  the document and writes the pages itself, the way it does with the model on this Mac.
+  On a set of 13 test documents it read them about seven times faster than the classic
+  way (about a minute instead of seven) at under a third of the cost, caught the same
+  contradictions, gave every company and person a page, and wrote no figure that is not
+  in a document. Classic reading writes richer prose; fast reading is more complete and
+  more uniform. Contradictions it finds become questions in the
+  Review tab. The spending cap per batch still holds: once Claude's reported cost reaches
+  it, no new document is started. Classic reading (a Claude session per batch that writes
+  the pages itself, in richer prose) can still be chosen there.
+- **Time left and cost:** once two batches have been read, the Upload page shows about how
+  long the documents still waiting will take, when they should be done, and, with Claude,
+  about what they will cost. Both are worked out from the batches already read, and get
+  better as more finish. With an API key the cost is your bill; with a Claude plan it is
+  the same work valued at API prices, which the plan covers within its usage limits. The
+  model on this Mac costs nothing.
 - **Process immediately:** press **Process now** on the Upload page.
 - **Ask questions** (Claude only): open the wiki folder in the Claude desktop app, or run
   `claude` in Terminal inside that folder.

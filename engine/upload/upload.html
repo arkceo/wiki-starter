@@ -82,6 +82,11 @@
   #now .obj { font-weight: 600; }
   #now .paren { color: var(--muted); }
   #now:empty::before { content: "Nothing is being read right now."; color: var(--muted); }
+  /* Time left and cost, once enough batches have been measured. */
+  #eta { display: flex; flex-wrap: wrap; gap: .2rem 1.1rem; font-size: .9rem; color: var(--muted);
+         font-variant-numeric: tabular-nums; }
+  #eta[hidden] { display: none; }
+  #eta b { color: var(--text); font-weight: 600; }
   #review-note { font-size: .88rem; padding: .4rem .7rem; border-radius: 8px; background: var(--warn-soft); }
   #review-note[hidden] { display: none; }
   .tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .5rem; margin-top: .15rem; }
@@ -299,6 +304,7 @@
     </div>
     <div class="meter" id="overall-meter" title="Light: converted to text. Solid: done.">
       <span class="buf"></span><span class="fill"></span></div>
+    <div id="eta" hidden><span id="eta-time"></span><span id="eta-cost"></span></div>
     <div id="now" aria-live="off"></div>
     <div id="review-note" hidden></div>
     <div class="tiles" role="group" aria-label="Show files by status">
@@ -371,6 +377,10 @@
     <div class="set-body">
       <section class="set-sec" id="sec-speed">
         <h3>Reading speed</h3>
+        <div class="ctl radios" role="radiogroup" aria-label="How Claude reads" id="pipe-ctl">
+          <label><input type="radio" name="set-pipe" value="fast"> Fast (default): Claude reads many documents at once and the wiki engine writes the pages</label>
+          <label><input type="radio" name="set-pipe" value="classic"> Classic: a Claude session reads each batch and writes the pages itself</label>
+        </div>
         <div class="ctl slider">
           <label class="sr" for="set-lanes">Batches read at once</label>
           <input type="range" id="set-lanes" min="1" max="6" step="1" value="3">
@@ -897,6 +907,7 @@
         logLine(e.t, e.label && e.label.startsWith("intake") ? "Claude is reading the documents"
           : e.label && e.label.startsWith("ingest") ? "Claude is applying the Update Packets"
           : e.label === "local" ? "The model on this Mac is reading (nothing leaves the Mac)"
+          : e.label === "fast" ? "Claude is reading the documents, many at once"
           : "Reading (" + (e.label || "engine") + ")"); break
       case "read": { setState(row(f), "reading", e.t); logLine(e.t, `Reading ${n}`); break }
       case "page": {
@@ -928,6 +939,7 @@
       }
       case "claude-end":
         if (e.ok && e.label === "local") logLine(e.t, `Finished reading (${e.turns || 0} questions to the model, ${e.detail || ""})`)
+        else if (e.ok && e.label === "fast") logLine(e.t, `Finished reading (${e.detail || ""}${e.cost != null ? ", $" + Number(e.cost).toFixed(2) : ""})`)
         else if (e.ok) logLine(e.t, `Finished reading (${e.turns || 0} steps${e.cost != null ? ", $" + Number(e.cost).toFixed(2) : ""})`)
         else logLine(e.t, `Reading stopped (${e.detail || "error"})`, "bad")
         break
@@ -953,6 +965,65 @@
       default: if (e.msg) logLine(e.t, e.msg)
     }
     render()
+  }
+
+  // ------------------------------------------------------------------ time and cost
+  // From the batches already read (scripts/wiki_estimate.py): nothing is shown until
+  // enough of them have been measured.
+  function fmtDuration(sec) {
+    const m = Math.round(Math.max(0, sec) / 60)
+    if (m < 1) return "under a minute"
+    if (m < 60) return `${m} min`
+    const h = Math.floor(m / 60), mm = m % 60
+    if (h < 24) return `${h} h${mm ? " " + mm + " m" : ""}`
+    const d = Math.floor(h / 24), hh = h % 24
+    return `${d} day${d === 1 ? "" : "s"}${hh ? " " + hh + " h" : ""}`
+  }
+  function fmtUsd(v) {
+    if (v == null) return ""
+    if (v < 10) return "$" + v.toFixed(2)
+    return "$" + Math.round(v).toLocaleString("en-US")
+  }
+  function fmtClock(epoch) {
+    const d = new Date(epoch * 1000), today = new Date()
+    const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    if (d.toDateString() === today.toDateString()) return time
+    return d.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" }) + " " + time
+  }
+  function costWords(e, amount, spent) {
+    const so = spent != null && spent > 0 ? ` (${fmtUsd(spent)} so far)` : ""
+    if (e.billing === "api") return [`About <b>${fmtUsd(amount)}</b> in Claude API costs${so}`,
+      "Billed to your Anthropic API key, as Claude reports each batch's cost."]
+    if (e.billing === "plan") return [`About <b>${fmtUsd(amount)}</b> of Claude usage at API prices${so}`,
+      "Your Claude plan covers this within its usage limits; no bill per document. The figure is the same work valued at API prices."]
+    return [`About <b>${fmtUsd(amount)}</b> at Claude API prices${so}`,
+      "Claude reports each batch's cost at API prices. With a Claude plan, the plan covers it within its usage limits."]
+  }
+  function renderEstimate(e, running) {
+    const box = $("eta"), time = $("eta-time"), cost = $("eta-cost")
+    const set = (el, html, title) => { el.innerHTML = html; el.title = title || "" }
+    box.hidden = true; set(time, ""); set(cost, "")
+    if (e.ready) {
+      box.hidden = false
+      const per = `Measured on the last ${e.measured} batches (${e.basisDocs} documents): about ${e.perDocSeconds < 90 ? Math.round(e.perDocSeconds) + " s" : fmtDuration(e.perDocSeconds)} per document`
+        + (e.perDocCost != null ? ` and ${fmtUsd(e.perDocCost)}` : "") + (e.lanes > 1 ? `, ${e.lanes} batches read at once` : "")
+        + ". It updates as batches finish."
+      set(time, `About <b>${fmtDuration(e.seconds)}</b> left for ${e.waiting.toLocaleString("en-US")} document${e.waiting === 1 ? "" : "s"} · done around ${fmtClock(e.finishAt)}`, per)
+      if (e.engine === "local") set(cost, "No cost: nothing leaves this Mac")
+      else if (e.costTotal != null) { const [html, title] = costWords(e, e.costTotal, e.spent); set(cost, html, title) }
+      return
+    }
+    if (e.waiting > (e.batchSize || 8)) {   // more than one batch: worth waiting for
+      box.hidden = false
+      set(time, `Time${e.engine === "local" ? "" : " and cost"} left: shown once ${e.needed} batches have been read (${e.measured} so far)`,
+        "Worked out from how long the batches already read took, and what they cost.")
+      return
+    }
+    if (!running && e.last && e.last.docs) {
+      box.hidden = false
+      set(time, `Last run: ${e.last.docs.toLocaleString("en-US")} document${e.last.docs === 1 ? "" : "s"} in ${fmtDuration(e.last.seconds)}`)
+      if (e.engine !== "local" && e.last.cost != null) { const [html, title] = costWords(e, e.last.cost, null); set(cost, html.replace("About ", ""), title) }
+    }
   }
 
   // ------------------------------------------------------------------ live stream
@@ -991,6 +1062,7 @@
         else if (waiting) { st.className = "busy"; st.textContent = `${waiting} file${waiting === 1 ? "" : "s"} waiting to start` }
         else { st.className = "idle"; st.textContent = "Idle" }
         $("run-meta").textContent = runner.running && runner.since ? `since ${runner.since}` : ""
+        renderEstimate(s.estimate || {}, runner.running)
         $("process").disabled = runner.running || !waiting
         // Worth pressing only when files wait and nothing is running.
         $("process").className = !runner.running && waiting ? "" : "secondary"
@@ -1378,15 +1450,18 @@
   // ------------------------------------------------------------------ settings
   const dlg = $("settings")
   let current = null
-  const speedText = (n) => `${n} batch${n === 1 ? "" : "es"} at once · ${n <= 1 ? "Slowest" : n <= 2 ? "Slower" : n === 3 ? "Moderate" : n <= 5 ? "Faster" : "Fastest"}`
+  const pipeChosen = () => (document.querySelector('input[name="set-pipe"]:checked') || {}).value || (current && current.pipeline) || "fast"
+  const speedText = (n) => (pipeChosen() === "fast" ? `${3 * n} documents at once` : `${n} batch${n === 1 ? "" : "es"} at once`)
+    + ` · ${n <= 1 ? "Slowest" : n <= 2 ? "Slower" : n === 3 ? "Moderate" : n <= 5 ? "Faster" : "Fastest"}`
+  const speedHelp = () => speedText(Number($("set-lanes").value)) + ". More at once finishes a big upload sooner and uses your Claude plan's limits faster."
   function setMsg(el, text, cls) { el.textContent = text || ""; el.className = cls || "" }
   function fillSettings(c) {
     current = c
     const local = c.engine === "local"
     $("set-lanes").value = c.parallelBatches
     $("sec-speed").setAttribute("aria-disabled", String(local))
-    $("speed-help").textContent = local ? "The model on this Mac reads one batch at a time, so this does not apply."
-      : speedText(c.parallelBatches) + ". More at once finishes a big upload sooner and uses your Claude plan's limits faster."
+    for (const r of document.querySelectorAll('input[name="set-pipe"]')) { r.checked = r.value === c.pipeline; r.disabled = local }
+    $("speed-help").textContent = local ? "The model on this Mac reads one batch at a time, so this does not apply." : speedHelp()
     for (const r of document.querySelectorAll('input[name="set-mode"]')) r.checked = r.value === c.review.mode
     $("set-bar").value = Math.round(c.review.autoConfidence * 100)
     $("bar-readout").textContent = $("set-bar").value + "%"
@@ -1416,7 +1491,8 @@
   }
   $("open-settings").onclick = openSettings
   $("set-close").onclick = $("set-cancel").onclick = () => dlg.close()
-  $("set-lanes").oninput = () => { if (current) $("speed-help").textContent = speedText(Number($("set-lanes").value)) + ". More at once finishes a big upload sooner and uses your Claude plan's limits faster." }
+  $("set-lanes").oninput = () => { if (current && current.engine !== "local") $("speed-help").textContent = speedHelp() }
+  for (const r of document.querySelectorAll('input[name="set-pipe"]')) r.onchange = $("set-lanes").oninput
   $("set-bar").oninput = () => { $("bar-readout").textContent = $("set-bar").value + "%" }
   $("set-form").onsubmit = async (e) => {
     e.preventDefault()
@@ -1424,7 +1500,7 @@
     const body = { title: $("set-title-in").value, company: $("set-company").value,
                    review: { mode, autoConfidence: Number($("set-bar").value) / 100 },
                    docsPerBatch: Number($("set-docs").value), maxUploadMb: Number($("set-mb").value) }
-    if (current.engine !== "local") { body.parallelBatches = Number($("set-lanes").value); body.maxSpendPerBatchUsd = Number($("set-spend").value) }
+    if (current.engine !== "local") { body.parallelBatches = Number($("set-lanes").value); body.maxSpendPerBatchUsd = Number($("set-spend").value); body.pipeline = pipeChosen() }
     $("set-save").disabled = true
     const r = await api("POST", "/api/settings", body)
     $("set-save").disabled = false

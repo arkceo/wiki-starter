@@ -38,6 +38,12 @@
 # watchdog that stops it only when it shows no progress. Nothing leaves the Mac: no
 # credentials are loaded, and Claude is never started.
 #
+# With Claude, unless "pipeline" is "classic", step 4 is done by the same script with Claude
+# reading (scripts/local_engine.py --reader claude, scripts/wiki_claude.py): one call per
+# document, many at once, and code that checks every answer against the document and
+# writes the pages. Contradictions it finds become questions in the Review tab. Update
+# Packets still go to a Claude session (step 5).
+#
 # Usage: wiki_runner.sh [--rebuild] [--no-settle]
 #   --rebuild    only rebuild the site (used by the installer and the updater)
 #   --no-settle  skip the wait-for-copies step (tests)
@@ -88,7 +94,9 @@ config_value() { # key default
 import json, sys
 key, default = sys.argv[1], sys.argv[2]
 try:
-    v = json.load(open("wiki.config.json")).get(key)
+    v = json.load(open("wiki.config.json"))
+    for part in key.split("."):   # "fast.docsPerBatch": a key inside a section
+        v = v.get(part) if isinstance(v, dict) else None
 except Exception:
     v = None
 print(default if v in (None, "") else v, end="")
@@ -142,12 +150,17 @@ acquire_lock() {
 release_lock() { rm -rf "$LOCK_DIR"; }
 # A run that ends early takes its background work (reading lanes, conversion, a site
 # rebuild) with it, so nothing outlives the lock.
+kill_tree() { # pid: it and everything it started (conversion runs several processes deep)
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null); do kill_tree "$c"; done
+  kill "$1" 2>/dev/null
+}
 stop_background() {
   local e p
   for e in ${running:-}; do
-    p=${e%%:*}; pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null
+    p=${e%%:*}; kill_tree "$p"
   done
-  for p in ${CONVERTER:-} ${BUILDER:-}; do pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; done
+  for p in ${CONVERTER:-} ${BUILDER:-}; do kill_tree "$p"; done
 }
 # However a run ends, the live line must not keep describing a step that stopped.
 finish_run() { stop_background; nowp idle; release_lock; }
@@ -633,6 +646,15 @@ fi
 route_misfiled
 ENGINE=$(config_value engine claude)
 [ "$ENGINE" = local ] || load_credentials
+# How Claude reads: "fast" (the default), one Claude call per document, many at once,
+# with the engine checking every answer and writing the pages (scripts/local_engine.py
+# --reader claude); or "classic", a Claude Code session per batch that writes the pages
+# itself.
+PIPELINE=classic
+if [ "$ENGINE" != local ] && [ "$(config_value pipeline fast)" != classic ]; then
+  PIPELINE=fast
+  export CLAUDE_BIN
+fi
 
 DOCS_BEFORE=$(list_pending raw/_intake)
 PACKETS_BEFORE=$(list_pending raw/inbox)
@@ -640,12 +662,21 @@ N_DOCS=$(count_lines "$DOCS_BEFORE")
 N_PACKETS=$(count_lines "$PACKETS_BEFORE")
 BATCH_SIZE=$(config_value docsPerBatch "")
 case "$BATCH_SIZE" in ''|*[!0-9]*|0) if [ "$ENGINE" = local ]; then BATCH_SIZE=20; else BATCH_SIZE=8; fi ;; esac
+if [ "$PIPELINE" = fast ]; then   # many documents per batch: Claude reads them all at once
+  BATCH_SIZE=$(config_value fast.docsPerBatch 40)
+  case "$BATCH_SIZE" in ''|*[!0-9]*|0) BATCH_SIZE=40 ;; esac
+fi
 BATCH_DIR="$STATE_DIR/batches"; TRIED="$STATE_DIR/tried.txt"
 rm -rf "$BATCH_DIR"; mkdir -p "$BATCH_DIR"; : > "$TRIED"
 [ -n "$DOCS_BEFORE" ] && printf '%s\n' "$DOCS_BEFORE" | split -a 4 -l "$BATCH_SIZE" - "$BATCH_DIR/batch."
 N_BATCHES=$(ls "$BATCH_DIR" | wc -l | tr -d ' ')
 log "$RUN_ID: $N_DOCS document(s), $N_PACKETS packet(s) waiting"
-ev run-start docs:="$N_DOCS" packets:="$N_PACKETS"
+# How Claude is paid for, so the Upload page can say what its cost estimate means.
+AUTH=login
+if [ "$ENGINE" = local ]; then AUTH=local
+elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then AUTH=api
+elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then AUTH=plan; fi
+ev run-start docs:="$N_DOCS" packets:="$N_PACKETS" auth="$AUTH"
 printf '%s\n%s\n' "$DOCS_BEFORE" "$PACKETS_BEFORE" | sed '/^$/d' | while IFS= read -r p; do
   ev queued file="$p"
 done
@@ -660,12 +691,13 @@ ARCHIVED_BEFORE=$(find archive/inbox -type f -name '*.md' 2>/dev/null | wc -l | 
 # waits for it. Claude reads up to LANES batches at once (parallelBatches, default 3);
 # the first batch runs alone, so a bad sign-in fails after one call and the pages every
 # batch shares (the business, the project) exist before several sessions edit them. The
-# model on this Mac reads one batch at a time.
+# model on this Mac, and the fast pipeline (whose parallelism is inside each batch: Claude
+# reads many of its documents at once), read one batch at a time.
 # A batch that ran (even one stopped at Claude's cap) counts as a try for its files; a
 # batch that never ran counts nothing. Claude or the model failing outright stops the
 # run; so does a hang, which counts a try only for the file it hung on.
 LANES=1
-if [ "$ENGINE" != local ]; then
+if [ "$ENGINE" != local ] && [ "$PIPELINE" != fast ]; then
   LANES=$(config_value parallelBatches 3)
   case "$LANES" in ''|*[!0-9]*|0) LANES=3 ;; esac
   [ "$LANES" -gt 6 ] && LANES=6
@@ -678,14 +710,43 @@ BATCHES=$(ls "$BATCH_DIR" | tr '\n' ' ')
 BUILD_EVERY_SECONDS=180
 CLAUDE_OK=1; STOP=""; STALLED_ON=""
 
+convert_list() { # list-file start [--quiet]: one conversion process
+  "$PY" scripts/to_markdown.py --only _intake --list "$1" 2>&1 \
+    | "$PY" scripts/wiki_events.py convert-stream --total "$N_DOCS" --start "$2" ${3:-}
+  [ "${PIPESTATUS[0]}" = 0 ] || log "to_markdown reported errors"
+}
+
+# The fast pipeline reads faster than one process can convert scans with OCR: each of its
+# batches is converted by CONVERT_JOBS processes at once (half the Mac's cores, at most 8;
+# fast.convertJobs in wiki.config.json overrides).
+CONVERT_JOBS=1
+if [ "$PIPELINE" = fast ]; then
+  CONVERT_JOBS=$(config_value fast.convertJobs "")
+  case "$CONVERT_JOBS" in
+    ''|*[!0-9]*|0) CONVERT_JOBS=$(( $(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 2) / 2 )) ;;
+  esac
+  [ "$CONVERT_JOBS" -lt 1 ] && CONVERT_JOBS=1
+  [ "$CONVERT_JOBS" -gt 8 ] && CONVERT_JOBS=8
+fi
+
 convert_batches() { # every batch in order, each marked ready once converted
-  local b n started=0 quiet=""
+  local b n started=0 quiet="" part pids at
   for b in $BATCHES; do
     [ -f "$LANE_DIR/stop" ] && break
     n=$(wc -l < "$BATCH_DIR/$b" | tr -d ' ')
-    "$PY" scripts/to_markdown.py --only _intake --list "$BATCH_DIR/$b" 2>&1 \
-      | "$PY" scripts/wiki_events.py convert-stream --total "$N_DOCS" --start "$started" $quiet
-    [ "${PIPESTATUS[0]}" = 0 ] || log "to_markdown reported errors"
+    if [ "$CONVERT_JOBS" -gt 1 ] && [ "$n" -gt 1 ]; then
+      rm -f "$LANE_DIR/$b.part."*
+      awk -v j="$CONVERT_JOBS" -v out="$LANE_DIR/$b.part." '{ print > (out (NR - 1) % j) }' "$BATCH_DIR/$b"
+      pids=""; at=$started
+      for part in "$LANE_DIR/$b.part."*; do
+        convert_list "$part" "$at" "$quiet" &
+        pids="$pids $!"; at=$((at + $(wc -l < "$part" | tr -d ' ')))
+        quiet=--quiet   # one process speaks for the live line
+      done
+      wait $pids
+    else
+      convert_list "$BATCH_DIR/$b" "$started" "$quiet"
+    fi
     started=$((started + n))
     : > "$LANE_DIR/$b.ready"
     quiet=--quiet   # from here on the live line belongs to the reading
@@ -701,6 +762,9 @@ read_batch() { # batch k: runs in the background; leaves its outcome in the lane
   STALLED_ON=""
   if [ "$ENGINE" = local ]; then
     run_local --docs "$BATCH_DIR/$b"; rc=$?
+  elif [ "$PIPELINE" = fast ]; then
+    if command -v "$CLAUDE_BIN" >/dev/null 2>&1; then run_local --docs "$BATCH_DIR/$b" --reader claude; rc=$?
+    else log "claude not found on PATH"; rc=2; fi
   else
     batch_prompt "$BATCH_DIR/$b" > "$LANE_DIR/$b.prompt.md"
     run_claude "intake#$k" "$LANE_DIR/$b.prompt.md" 100 "$BATCH_DIR/$b"; rc=$?

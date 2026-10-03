@@ -2,6 +2,34 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Fast reading for large uploads
+- **Fast reading is now how Claude reads.** Claude reads many documents at once, one
+  question each (with Claude Sonnet), and the wiki engine
+  checks every answer against the document and writes the pages itself, the way it does
+  with the model on this Mac. Figures that are not in a document are left out, and a
+  figure that changes what an earlier document said becomes a question in the Review tab
+  (for you, or for Jev in Auto-review).
+- On our 13 test documents, fast reading took about a minute instead of seven, at under
+  a third of the cost, and found everything a careful reader should: every fact, every
+  company and person, both contradictions, and no figure that is not in a document.
+  Classic reading writes richer prose; fast reading is more complete and more uniform.
+- Scans and photos are converted by several processes at once, so OCR keeps up.
+- Classic reading, a Claude session per batch that writes the pages itself in richer
+  prose, can still be chosen in Settings, under Reading speed. Update Packets and your
+  review answers are still applied by a Claude session either way.
+
+## Time left and cost for a large upload
+- Once two batches have been read, the Upload page shows about how long the documents
+  still waiting will take and when they should be done, under the progress bar.
+- With Claude it also shows about what the whole upload will cost, and what has been
+  spent so far. With an API key that is your bill. With a Claude plan it is the same work
+  valued at API prices: the plan covers it within its usage limits, with no bill per
+  document. The model on this Mac costs nothing, so only the time is shown.
+- Both are measured, never guessed: they come from how long the last batches took and
+  what Claude reported they cost, read the way the wiki reads them (the first batch
+  alone, then several at once). Hover over the line to see the pace it is based on.
+- After a run, the line says how long it took and what it cost.
+
 ## Photos with no words get a description
 - With Claude, a photo is a document even when there are no words in it: a delivery, a
   site visit, a product, a whiteboard drawing. It gets a page saying what the photo

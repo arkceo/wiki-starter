@@ -16,7 +16,8 @@ Run by a LaunchAgent with KeepAlive. Two origins, on two ports of 127.0.0.1:
     /api/upload        POST one file into the queue (raw/_intake/, or raw/inbox/ for a packet)
     /api/events        the activity log as a live stream (server-sent events), and what
                        is happening right now as `now` events
-    /api/status        what is queued, running and waiting for review
+    /api/status        what is queued, running and waiting for review, and how long and
+                       how much the documents still waiting should take (wiki_estimate.py)
     /api/process       POST: start the runner now
     /api/review        the review questions (scripts/wiki_review.py); POST
                        /api/review/answer settles one, /api/review/score asks Jev again
@@ -61,6 +62,7 @@ import urllib.parse
 
 WIKI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(WIKI_DIR, "scripts"))
+import wiki_estimate  # noqa: E402
 import wiki_events  # noqa: E402
 import wiki_jev  # noqa: E402
 import wiki_netguard  # noqa: E402
@@ -252,22 +254,44 @@ def runner_state():
     return {"running": True, "since": started}
 
 
+# Time left and cost, from the batches measured so far (scripts/wiki_estimate.py). The
+# tracker reads only what the event log gained since the last poll.
+ESTIMATE = wiki_estimate.Tracker()
+
+
+def estimate(cfg, queue, runner):
+    try:
+        ESTIMATE.read([os.path.join(STATE_DIR, "events.1.jsonl"), wiki_events.EVENTS])
+        fast = cfg.get("engine") != "local" and cfg.get("pipeline") != "classic"
+        fast_cfg = cfg.get("fast") if isinstance(cfg.get("fast"), dict) else {}
+        return ESTIMATE.estimate(len(queue["intake"]), cfg.get("engine"),
+                                 1 if fast else cfg.get("parallelBatches", 3),   # fast: one batch at a time
+                                 (fast_cfg.get("docsPerBatch") or 40) if fast else cfg.get("docsPerBatch"),
+                                 runner.get("running", False), fast=fast)
+    except Exception as e:  # an estimate is never worth breaking the status for
+        print(f"estimate: {e}", file=sys.stderr)
+        return {"ready": False}
+
+
 def status():
     cfg = load_config()
     try:
         version = open(os.path.join(WIKI_DIR, ".wiki-engine", "VERSION")).read().strip()
     except OSError:
         version = ""
+    queue = {k: list_queue(v) for k, v in QUEUES.items()}
+    runner = runner_state()
     return {
         "title": cfg.get("title") or "Wiki",
         "engine": cfg.get("engine") or "claude",
         "version": version,
         "maxUploadMb": round(max_upload_bytes() / 1024 / 1024),
-        "queue": {k: list_queue(v) for k, v in QUEUES.items()},
+        "queue": queue,
         "needsReview": list_queue("raw/_needs-review"),
         "review": {"open": wiki_review.count_open(), "rev": wiki_review.revision()},
-        "runner": runner_state(),
+        "runner": runner,
         "now": wiki_events.read_now(),
+        "estimate": estimate(cfg, queue, runner),
     }
 
 
@@ -320,12 +344,17 @@ def settings_view():
     cfg = load_config()
     engine = cfg.get("engine") or "claude"
     spend = cfg.get("maxSpendPerBatchUsd", cfg.get("maxSpendPerRunUsd", 5))
+    fast = engine != "local" and cfg.get("pipeline") != "classic"   # Fast is the default
+    fast_docs = number((cfg.get("fast") or {}).get("docsPerBatch") if isinstance(cfg.get("fast"), dict) else None, int, 0)
     return {
         "engine": engine,
         "title": cfg.get("title") or "",
         "company": cfg.get("company") or "",
         "parallelBatches": max(1, min(6, number(cfg.get("parallelBatches"), int, 3))),
-        "docsPerBatch": number(cfg.get("docsPerBatch"), int, 0) or (20 if engine == "local" else 8),
+        "pipeline": "classic" if cfg.get("pipeline") == "classic" else "fast",
+        # Fast reading has batches of its own size (fast.docsPerBatch); the field edits that one.
+        "docsPerBatch": (fast_docs or 40) if fast else (number(cfg.get("docsPerBatch"), int, 0)
+                                                        or (20 if engine == "local" else 8)),
         "maxUploadMb": round(max_upload_bytes() / 1024 / 1024),
         "maxSpendPerBatchUsd": number(spend, float, 5.0),
         "review": wiki_jev.review_settings(cfg),
@@ -351,6 +380,11 @@ def change_settings(body):
             errors.append("the title cannot be empty")
     if "company" in body:
         updates["company"] = clean_text(body["company"], 120)
+    if "pipeline" in body:
+        if body["pipeline"] in ("classic", "fast"):
+            updates["pipeline"] = body["pipeline"]
+        else:
+            errors.append("how Claude reads must be classic or fast")
     for k, (kind, lo, hi) in SETTABLE.items():
         if k in body:
             v = number(body[k], kind, None)
@@ -377,6 +411,14 @@ def change_settings(body):
                 cfg = json.load(f)
         except (OSError, ValueError):
             return [], ["wiki.config.json could not be read; fix or restore it first"]
+        pipeline = updates.get("pipeline", cfg.get("pipeline")) or "fast"
+        if "docsPerBatch" in updates and cfg.get("engine") != "local" and pipeline == "fast":
+            # Fast reading's batches are its own (fast.docsPerBatch), not the classic size.
+            fast_cfg = dict(cfg.get("fast") or {}) if isinstance(cfg.get("fast"), dict) else {}
+            if fast_cfg.get("docsPerBatch") != updates["docsPerBatch"]:
+                fast_cfg["docsPerBatch"] = updates["docsPerBatch"]
+                updates["fast"] = fast_cfg
+            del updates["docsPerBatch"]
         changed = [k for k, v in updates.items() if cfg.get(k) != v]
         if changed:
             cfg.update(updates)
