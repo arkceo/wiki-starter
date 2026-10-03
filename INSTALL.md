@@ -81,11 +81,15 @@ If anything fails, run the same line again. Finished steps are skipped.
 
 - **Model on this Mac:** free. It uses the Mac's memory and power while it reads, and
   frees the memory when it is done.
-- **Subscription:** processing counts against your plan's usage limits.
+- **Subscription:** processing counts against your plan's usage limits. Claude reads up
+  to 3 batches at once, so a large upload uses them up faster, in less time. On a
+  smaller plan, set `parallelBatches` to 1 in `wiki.config.json` to read one batch at
+  a time.
 - **API key:** you pay per use. A typical document costs cents; a long scanned contract
-  can cost more. Documents are read 8 at a time, and each batch is capped (default
+  can cost more. Documents are read in batches of 8, and each batch is capped (default
   US$5, `maxSpendPerBatchUsd` in `wiki.config.json`), so a large upload costs in
-  proportion to its size. A file that fails twice is set aside instead of retried.
+  proportion to its size. Reading batches side by side changes the speed, not the total.
+  A file that fails twice is set aside instead of retried.
 - Everything else is free.
 
 ## Privacy

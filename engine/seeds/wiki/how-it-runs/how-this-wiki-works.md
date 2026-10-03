@@ -34,10 +34,11 @@ Two background agents start when you log in:
 - **The runner** (`scripts/wiki_runner.sh`) wakes when something lands in the queue,
   and every 15 minutes in case it missed one. It waits until files finish copying, then:
   1. takes new documents in batches (8 at a time with Claude, 20 with the model on this
-     Mac; `docsPerBatch` in `wiki.config.json`), so a large upload is read in full and
-     its first pages appear while the rest are still waiting;
-  2. converts each batch to Markdown (`scripts/to_markdown.py`, see
-     [[raw-to-markdown-conversion]]) and reads it: Claude, or the model on this Mac
+     Mac; `docsPerBatch` in `wiki.config.json`). Claude reads up to 3 batches at the same
+     time (`parallelBatches`; the first batch always runs alone), and the site is
+     refreshed every few minutes, so the first pages appear while the rest are being read;
+  2. converts the batches to Markdown ahead of the reading (`scripts/to_markdown.py`, see
+     [[raw-to-markdown-conversion]]) and reads each one: Claude, or the model on this Mac
      (`scripts/local_engine.py`). The model on this Mac answers focused questions
      about each document; code keeps only figures the document contains and writes a
      summary page under `sources/`, a page for each company, person and product it

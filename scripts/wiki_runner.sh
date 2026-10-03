@@ -139,8 +139,17 @@ acquire_lock() {
   date '+%H:%M' > "$LOCK_DIR/started"
 }
 release_lock() { rm -rf "$LOCK_DIR"; }
+# A run that ends early takes its background work (reading lanes, conversion, a site
+# rebuild) with it, so nothing outlives the lock.
+stop_background() {
+  local e p
+  for e in ${running:-}; do
+    p=${e%%:*}; pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null
+  done
+  for p in ${CONVERTER:-} ${BUILDER:-}; do pkill -P "$p" 2>/dev/null; kill "$p" 2>/dev/null; done
+}
 # However a run ends, the live line must not keep describing a step that stopped.
-finish_run() { nowp idle; release_lock; }
+finish_run() { stop_background; nowp idle; release_lock; }
 
 # --------------------------------------------------------- credentials ---------
 load_credentials() {
@@ -315,7 +324,10 @@ now_file() {
 # files count as tried); 4 stopped by the watchdog; 1 Claude could not run.
 run_claude() { # label prompt-file max-turns
   local label="$1" prompt_file="$2" turns="$3" budget pid fpid waited=0 rc outcome stopped=0
-  local stream="$STATE_DIR/claude-stream.jsonl"
+  local tag; tag=$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '_')
+  # Several sessions can run at once: each has its own stream, and its own record of
+  # the file it is on (the shared live line may be showing another session's).
+  local stream="$STATE_DIR/claude-stream-$tag.jsonl" current="$STATE_DIR/claude-current-$tag"
   # A wiki that reads with the model on this Mac never sends anything to Anthropic.
   if [ "$ENGINE" = local ]; then
     log "claude $label: refused, this wiki reads with the model on this Mac"
@@ -326,7 +338,7 @@ run_claude() { # label prompt-file max-turns
   log "claude $label: start (max turns $turns, max spend \$$budget)"
   ev claude-start label="$label"
   nowp think detail="starting Claude"
-  : > "$stream"
+  : > "$stream"; : > "$current"
   # Claude's actions stream to a file, and a follower turns them into events and log
   # lines. The watchdog below watches claude itself, never the follower.
   "$CLAUDE_BIN" -p "$(cat "$prompt_file")" \
@@ -338,13 +350,13 @@ run_claude() { # label prompt-file max-turns
     > "$stream" 2>> "$LOG_FILE" < /dev/null &
   pid=$!
   "$PY" scripts/wiki_events.py claude-stream --file "$stream" --pid "$pid" --label "$label" \
-    >> "$LOG_FILE" 2>&1 &
+    --current "$current" >> "$LOG_FILE" 2>&1 &
   fpid=$!
   while kill -0 "$pid" 2>/dev/null; do
-    sleep 5; waited=$((waited + 5))
+    sleep 2; waited=$((waited + 2))   # short: a finished batch frees its lane quickly
     if [ "$waited" -ge "$CLAUDE_TIMEOUT_SECONDS" ]; then
       log "claude $label: watchdog stopped it after ${waited}s"
-      STALLED_ON=$(now_file)
+      STALLED_ON=$(cat "$current" 2>/dev/null)
       kill "$pid" 2>/dev/null; sleep 5; kill -9 "$pid" 2>/dev/null
       stopped=1
       break
@@ -505,15 +517,18 @@ commit_changes() { # message
     commit -q -m "$1" >> "$LOG_FILE" 2>&1 && log "committed: $1" && ev committed msg="$1"
 }
 
-build_site() {
-  local next="$STATE_DIR/public.next" old="$STATE_DIR/public.old"
+build_site() { # [quiet]: a rebuild during a run, which leaves the live line alone and
+  # fails silently (the next rebuild, or the one at the end, catches up)
+  local next="$STATE_DIR/public.next" old="$STATE_DIR/public.old" quiet="${1:-}"
   if [ ! -f quartz/bootstrap-cli.mjs ] || [ ! -d node_modules ]; then
     log "site build skipped: Quartz is not installed here"
     return 1
   fi
   rm -rf "$next" "$old"
-  ev build-start
-  nowp build detail="rebuilding the website"
+  if [ -z "$quiet" ]; then
+    ev build-start
+    nowp build detail="rebuilding the website"
+  fi
   if "$NODE_BIN" quartz/bootstrap-cli.mjs build -d wiki -o "$next" >> "$LOG_FILE" 2>&1 \
      && [ -f "$next/index.html" ]; then
     # Swap in one step so the viewer never serves a half-built site.
@@ -526,7 +541,7 @@ build_site() {
   fi
   rm -rf "$next"
   log "site build FAILED (the previous site is still being served)"
-  ev build-failed
+  [ -z "$quiet" ] && ev build-failed
   return 1
 }
 
@@ -535,6 +550,9 @@ batch_prompt() { # batch-file
   cat engine/prompts/intake.md
   printf '\nThis run is one batch of a larger upload. Process ONLY these documents, and leave every other file in raw/_intake/ exactly where it is (later batches handle them):\n\n'
   sed 's/^/- /' "$1"
+  if [ "${LANES:-1}" -gt 1 ]; then
+    printf '\nOther sessions are filing other batches into this wiki at the same time. Pages you share with them (index.md, log.md, wiki/_review.md, and any company, person, topic or project page) can change while you work: read such a page right before you change it, change it with Edit (never rewrite it whole with Write), and if an edit is refused because the file changed, read it again and redo the edit.\n'
+  fi
 }
 
 # ---------------------------------------------------------------- main ---------
@@ -607,37 +625,116 @@ SNAP_BEFORE="$STATE_DIR/snap.before"; SNAP_AFTER="$STATE_DIR/snap.after"
 snapshot_filed_sources > "$SNAP_BEFORE"
 ARCHIVED_BEFORE=$(find archive/inbox -type f -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
 
-# Documents, batch by batch: convert the batch, read it, then the next. A batch that ran
-# (even one stopped at Claude's cap) counts as a try for its files; a batch that never ran
-# counts nothing. Claude or the model failing outright stops the run; so does a hang, which
-# counts a try only for the file it hung on.
+# Documents, in batches. Conversion runs ahead in the background, so reading never
+# waits for it. Claude reads up to LANES batches at once (parallelBatches, default 3);
+# the first batch runs alone, so a bad sign-in fails after one call and the pages every
+# batch shares (the business, the project) exist before several sessions edit them. The
+# model on this Mac reads one batch at a time.
+# A batch that ran (even one stopped at Claude's cap) counts as a try for its files; a
+# batch that never ran counts nothing. Claude or the model failing outright stops the
+# run; so does a hang, which counts a try only for the file it hung on.
+LANES=1
+if [ "$ENGINE" != local ]; then
+  LANES=$(config_value parallelBatches 3)
+  case "$LANES" in ''|*[!0-9]*|0) LANES=3 ;; esac
+  [ "$LANES" -gt 6 ] && LANES=6
+fi
+LANE_DIR="$STATE_DIR/lanes"; rm -rf "$LANE_DIR"; mkdir -p "$LANE_DIR"
+# Each session keeps its own stream; the last run's go now (and the single stream of
+# engines before this one).
+rm -f "$STATE_DIR"/claude-stream*.jsonl "$STATE_DIR"/claude-current-*
+BATCHES=$(ls "$BATCH_DIR" | tr '\n' ' ')
+BUILD_EVERY_SECONDS=180
 CLAUDE_OK=1; STOP=""; STALLED_ON=""
-k=0; started=0
-for bf in "$BATCH_DIR"/batch.*; do
-  [ -f "$bf" ] || continue
-  k=$((k + 1))
-  n=$(wc -l < "$bf" | tr -d ' ')
+
+convert_batches() { # every batch in order, each marked ready once converted
+  local b n started=0 quiet=""
+  for b in $BATCHES; do
+    [ -f "$LANE_DIR/stop" ] && break
+    n=$(wc -l < "$BATCH_DIR/$b" | tr -d ' ')
+    "$PY" scripts/to_markdown.py --only _intake --list "$BATCH_DIR/$b" 2>&1 \
+      | "$PY" scripts/wiki_events.py convert-stream --total "$N_DOCS" --start "$started" $quiet
+    [ "${PIPESTATUS[0]}" = 0 ] || log "to_markdown reported errors"
+    started=$((started + n))
+    : > "$LANE_DIR/$b.ready"
+    quiet=--quiet   # from here on the live line belongs to the reading
+  done
+}
+
+read_batch() { # batch k: runs in the background; leaves its outcome in the lane folder
+  local b="$1" k="$2" n rc
+  n=$(wc -l < "$BATCH_DIR/$b" | tr -d ' ')
   [ "$N_BATCHES" -gt 1 ] && export WIKI_BATCH="$k/$N_BATCHES"
   log "batch $k of $N_BATCHES: $n document(s)"
   ev batch n:="$k" of:="$N_BATCHES" docs:="$n"
-  nowp convert of:="$N_DOCS" detail="converting documents to text"
-  "$PY" scripts/to_markdown.py --only _intake --list "$bf" 2>&1 \
-    | "$PY" scripts/wiki_events.py convert-stream --total "$N_DOCS" --start "$started"
-  [ "${PIPESTATUS[0]}" = 0 ] || log "to_markdown reported errors"
-  started=$((started + n))
+  STALLED_ON=""
   if [ "$ENGINE" = local ]; then
-    run_local --docs "$bf"; rc=$?
+    run_local --docs "$BATCH_DIR/$b"; rc=$?
   else
-    batch_prompt "$bf" > "$STATE_DIR/intake-batch.md"
-    run_claude "intake#$k" "$STATE_DIR/intake-batch.md" 100; rc=$?
+    batch_prompt "$BATCH_DIR/$b" > "$LANE_DIR/$b.prompt.md"
+    run_claude "intake#$k" "$LANE_DIR/$b.prompt.md" 100; rc=$?
   fi
+  printf '%s' "$STALLED_ON" > "$LANE_DIR/$b.stalled"
+  printf '%s' "$rc" > "$LANE_DIR/$b.rc"
+}
+
+finish_batch() { # batch: count its tries; a failure stops new batches
+  local b="$1" rc stalled
+  rc=$(cat "$LANE_DIR/$b.rc" 2>/dev/null); stalled=$(cat "$LANE_DIR/$b.stalled" 2>/dev/null)
   case "$rc" in
-    0|3) cat "$bf" >> "$TRIED" ;;
-    4) if [ -n "$STALLED_ON" ]; then printf '%s\n' "$STALLED_ON" >> "$TRIED"; else cat "$bf" >> "$TRIED"; fi
-       STOP=stalled; CLAUDE_OK=0; break ;;
-    *) STOP=engine; CLAUDE_OK=0; break ;;
+    0|3) cat "$BATCH_DIR/$b" >> "$TRIED" ;;
+    4) if [ -n "$stalled" ]; then printf '%s\n' "$stalled" >> "$TRIED"; STALLED_ON="$stalled"
+       else cat "$BATCH_DIR/$b" >> "$TRIED"; fi
+       [ "$STOP" = engine ] || STOP=stalled; CLAUDE_OK=0 ;;
+    *) STOP=engine; CLAUDE_OK=0 ;;
   esac
+}
+
+# Pages appear while a long upload is being read: the site is rebuilt in the background
+# after a batch, at most every BUILD_EVERY_SECONDS.
+BUILDER=""; LAST_BUILD=-100000
+build_soon() {
+  if [ -n "$BUILDER" ] && kill -0 "$BUILDER" 2>/dev/null; then return 0; fi
+  [ $((SECONDS - LAST_BUILD)) -ge "$BUILD_EVERY_SECONDS" ] || return 0
+  LAST_BUILD=$SECONDS
+  build_site quiet &
+  BUILDER=$!
+}
+
+convert_batches &
+CONVERTER=$!
+queue="$BATCHES"; running=""; k=0; first_done=0
+while :; do
+  still=""
+  for entry in $running; do
+    if kill -0 "${entry%%:*}" 2>/dev/null; then still="$still $entry"; continue; fi
+    wait "${entry%%:*}" 2>/dev/null
+    finish_batch "${entry#*:}"
+    first_done=1
+    [ "$CLAUDE_OK" = 1 ] && build_soon
+  done
+  running="$still"
+  busy=$(printf '%s\n' $running | sed '/^$/d' | wc -l | tr -d ' ')
+  limit=$LANES; [ "$first_done" = 1 ] || limit=1
+  while [ "$CLAUDE_OK" = 1 ] && [ -n "$(printf '%s' "$queue" | tr -d ' ')" ] && [ "$busy" -lt "$limit" ]; do
+    b=$(printf '%s\n' $queue | head -1)
+    if [ ! -f "$LANE_DIR/$b.ready" ]; then
+      kill -0 "$CONVERTER" 2>/dev/null && break
+      : > "$LANE_DIR/$b.ready"   # the converter is gone: Claude notes any missing text
+    fi
+    queue=$(printf '%s\n' $queue | sed 1d | tr '\n' ' ')
+    k=$((k + 1))
+    read_batch "$b" "$k" &
+    running="$running $!:$b"; busy=$((busy + 1))
+  done
+  if [ -z "$(printf '%s' "$running" | tr -d ' ')" ]; then
+    [ "$CLAUDE_OK" = 1 ] && [ -n "$(printf '%s' "$queue" | tr -d ' ')" ] || break
+  fi
+  sleep 1
 done
+: > "$LANE_DIR/stop"
+wait "$CONVERTER" 2>/dev/null; CONVERTER=""
+[ -n "$BUILDER" ] && wait "$BUILDER" 2>/dev/null; BUILDER=""
 unset WIKI_BATCH
 
 # Update Packets, after the documents.

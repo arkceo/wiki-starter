@@ -2,6 +2,17 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Claude reads three batches at once
+- Claude now reads up to 3 batches of documents at the same time. The first batch runs
+  alone, then the rest go three at a time. Set `parallelBatches` in `wiki.config.json`
+  (1 to 6; 1 reads one batch at a time as before).
+- Documents are converted to text in the background ahead of the reading, so a scan's
+  OCR no longer holds up Claude.
+- The site is refreshed every few minutes during a long run, so the first pages appear
+  while the rest are still being read.
+- A large upload uses a subscription's usage, or an API key's spending, faster. The
+  total stays about the same.
+
 ## A sign-in token pasted over two lines works
 - Claude Code prints the subscription token over two lines in a narrow Terminal window.
   The installer read only the first line, rejected the token, and the second half then

@@ -309,9 +309,12 @@ def pid_alive(pid):
         return True
 
 
-def follow(path, pid, label, poll=0.5):
+def follow(path, pid, label, poll=0.5, current_path=""):
+    """Turn one Claude session's stream into events and live-line records. With
+    current_path, also keep the file this session is working on there: several sessions
+    can run at once, so the shared live line cannot say which file a stalled one was on."""
     stream = ClaudeStream(label)
-    buf, offset = "", 0
+    buf, offset, last = "", 0, None
     while True:
         alive = pid_alive(pid)
         try:
@@ -340,6 +343,13 @@ def follow(path, pid, label, poll=0.5):
                 except (ValueError, TypeError):
                     log(f"claude {label}: {buf.strip()[:500]}")
             break
+        if current_path and stream.current != last:
+            last = stream.current
+            try:
+                with open(current_path, "w", encoding="utf-8") as f:
+                    f.write(last)
+            except OSError:
+                pass
         if not chunk:
             time.sleep(poll)
     if not stream.done:
@@ -353,7 +363,10 @@ def ignored_name(name):
             or name.endswith((".download", ".crdownload", ".part", ".partial", ".tmp")))
 
 
-def convert_stream(stream=sys.stdin, total=0, start=0):
+def convert_stream(stream=sys.stdin, total=0, start=0, quiet=False):
+    """Conversion progress as events. quiet: leave the live line alone (conversion running
+    ahead in the background, while the live line belongs to the reading)."""
+    say = (lambda *a, **k: None) if quiet else set_now
     current, seen = "", start
     for line in stream:
         log(line.rstrip("\n"))
@@ -366,14 +379,14 @@ def convert_stream(stream=sys.stdin, total=0, start=0):
                 current = "raw/" + name
                 seen += 1
                 emit("convert", file=current)
-                set_now("convert", file=current, n=seen, of=total or None,
-                        detail="converting it to text")
+                say("convert", file=current, n=seen, of=total or None,
+                    detail="converting it to text")
         elif s.startswith("ocr: ") and current:
             pages = s[len("ocr: "):].split(" ", 1)[0]
             pages = int(pages) if pages.isdigit() else None
             emit("ocr", file=current, pages=pages)
-            set_now("ocr", file=current, pages=pages, n=seen, of=total or None,
-                    detail="reading the scanned pages with OCR")
+            say("ocr", file=current, pages=pages, n=seen, of=total or None,
+                detail="reading the scanned pages with OCR")
     if current:
         emit("converted", file=current)
 
@@ -388,9 +401,11 @@ def main(argv=None):
     c.add_argument("--file", required=True)
     c.add_argument("--pid", type=int, required=True)
     c.add_argument("--label", default="")
+    c.add_argument("--current", default="")
     cs = sub.add_parser("convert-stream")
     cs.add_argument("--total", type=int, default=0)
     cs.add_argument("--start", type=int, default=0)
+    cs.add_argument("--quiet", action="store_true")
     n = sub.add_parser("now")
     n.add_argument("type")
     n.add_argument("fields", nargs="*")
@@ -411,9 +426,9 @@ def main(argv=None):
                 fields[k] = v
         (emit if a.cmd == "emit" else set_now)(a.type, **fields)
     elif a.cmd == "claude-stream":
-        follow(a.file, a.pid, a.label)
+        follow(a.file, a.pid, a.label, current_path=a.current)
     else:
-        convert_stream(total=a.total, start=a.start)
+        convert_stream(total=a.total, start=a.start, quiet=a.quiet)
 
 
 if __name__ == "__main__":

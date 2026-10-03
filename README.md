@@ -65,9 +65,10 @@ If macOS shows **Background Items Added**, leave it allowed.
   (upload, convert, read and write, file), an "n of m done" count, a live line saying what
   the wiki is doing at that moment, and a log of what it has done. You get a notification
   when the wiki has been updated.
-- **Large uploads** are read in batches (8 documents at a time with Claude, 20 with the
-  model on this Mac). The first pages appear after the first batch, and the live line
-  shows which batch is being read.
+- **Large uploads** are read in batches: 8 documents each with Claude, up to 3 batches at
+  the same time, and 20 at a time with the model on this Mac. Documents are converted to
+  text ahead of the reading, and the site is refreshed every few minutes, so the first
+  pages appear while the rest are still being read.
 - **Process immediately:** press **Process now** on the Upload page.
 - **Ask questions** (Claude only): open the wiki folder in the Claude desktop app, or run
   `claude` in Terminal inside that folder.
