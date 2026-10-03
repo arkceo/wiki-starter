@@ -48,6 +48,9 @@ generated/
   _templates/            # update-packet.md, project-claude.md
   <project>/             # CLAUDE.md, knowledge/, kickoff-prompts/
 archive/inbox/           # processed packets
+review/
+  open/                  # questions the owner can answer with one click (Upload page, Review tab)
+  done/                  # answered questions, with the answer and who gave it
 index.md                 # catalog of every wiki page
 log.md                   # append-only chronological record
 ```
@@ -105,9 +108,12 @@ facts:
 ## Operation: INTAKE (documents in `raw/_intake/`)
 
 1. Each document has already been converted to `cache/md/_intake/<name>.md`. Read that.
-   Figures from scanned PDFs are OCR-derived; the original stays authoritative. A mirror
-   marked `method: ERROR` or `note: scanned-no-ocr` could not be read: record it in
-   `wiki/_review.md` and leave the document in `raw/_intake/`.
+   Figures from scans and photos are OCR-derived; the original stays authoritative. Look
+   at the original image or PDF too when it is a photo, or when the mirror's text is
+   missing, empty or garbled. A document that cannot be read either way: record it in
+   `wiki/_review.md` and leave it in `raw/_intake/`.
+   A photo is a document even with no words in it: its summary page says what the photo
+   shows and when it was taken. Describe people; never name anyone from their face.
 2. Write or update a **summary page** for the document, then update every affected
    entity and concept page, creating missing ones. Cite the document's **final** path.
 3. Move the document from `raw/_intake/` into `raw/<project>/` with a plain `mv`
@@ -122,6 +128,8 @@ facts:
 3. Move the processed packet to `archive/inbox/`. A packet already reflected in the wiki
    is a no-op, but still moved.
 4. A file with git conflict markers is treated as one packet per side.
+5. A packet carrying `Review item: RV-...` is an answer to a review question: apply it,
+   and note under the matching `wiki/_review.md` entry that it was resolved.
 
 ## Contradictions and uncertainty
 
@@ -131,7 +139,10 @@ the uncertain one `status: needs-review`), and append to `wiki/_review.md`:
     ## [YYYY-MM-DD] needs-review | <project> | <page> | <reason>
     - what happened / what to decide
 
-`wiki/_review.md` is append-only. A human clears it on their own schedule.
+When the owner could settle it by choosing an answer, also write a review item in
+`review/open/` (the format is in `engine/prompts/intake.md`); the Upload page's Review
+tab shows it with one-click answers. Cite its id as `RV-...` in backticks, never as a
+link. `wiki/_review.md` is append-only. A human clears it on their own schedule.
 
 ## Operation: QUERY
 

@@ -22,5 +22,6 @@ Click **Upload** at the top right of any page and drop files onto it:
 - **Documents** (PDF, Word, Excel, PowerPoint, images, scans), or whole folders of them.
 - **Notes and decisions** from a Claude conversation (Update Packets, `.md` files).
 
-The Upload page shows each file's progress and a live log of what the wiki is doing. A
-notification appears when the wiki has been updated. Refresh this page to see it.
+The Upload page shows each file's progress and a live log of what the wiki is doing.
+Pages update by themselves when the wiki changes, and anything that needs your decision
+waits in the Upload page's **Review** tab.

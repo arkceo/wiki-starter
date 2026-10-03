@@ -9,6 +9,8 @@ Run by a LaunchAgent with KeepAlive. Two origins, on two ports of 127.0.0.1:
     /raw/<path>        source documents, read-only, so "Sources" links open the original
     /archive/<path>    processed Update Packets, read-only
     /upload            redirects to the Upload app
+    /.wiki/build       which build of the site is being served; every page carries a small
+                       script that asks, and shows a new build without a manual refresh
   the Upload app (uploadPort, default port + 1)
     /upload            the Upload & Logs page (engine/upload/upload.html)
     /api/upload        POST one file into the queue (raw/_intake/, or raw/inbox/ for a packet)
@@ -16,6 +18,11 @@ Run by a LaunchAgent with KeepAlive. Two origins, on two ports of 127.0.0.1:
                        is happening right now as `now` events
     /api/status        what is queued, running and waiting for review
     /api/process       POST: start the runner now
+    /api/review        the review questions (scripts/wiki_review.py); POST
+                       /api/review/answer settles one, /api/review/score asks Jev again
+    /api/settings      GET, or POST to change, the settings in wiki.config.json the owner may
+                       change here; POST /api/settings/jev-key saves the TypeSafe key in the
+                       Keychain (or removes it)
 
 Both bind to 127.0.0.1, so nothing on the network can reach them. The rest stops a web
 page, from another site or from inside the wiki, using the browser against them:
@@ -29,7 +36,9 @@ page, from another site or from inside the wiki, using the browser against them:
 Requests that try to escape the served folders (../, encoded or not, or a symlink
 pointing outside) are refused. Nothing here looks up a name or reaches another device on
 the network (scripts/wiki_netguard.py refuses it), so macOS has no reason to ask for
-local network access. Standard library only.
+local network access. The one outside call: with Claude reading and a TypeSafe key saved,
+review questions go to TypeSafe's Jev to be scored (scripts/wiki_jev.py). Standard
+library only.
 
 Usage: wiki_server.py [--port N] [--upload-port N]   (default: wiki.config.json)
 """
@@ -53,7 +62,9 @@ import urllib.parse
 WIKI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(WIKI_DIR, "scripts"))
 import wiki_events  # noqa: E402
+import wiki_jev  # noqa: E402
 import wiki_netguard  # noqa: E402
+import wiki_review  # noqa: E402
 
 BIND = "127.0.0.1"
 ROOTS = {"raw": "raw", "archive": "archive"}  # url prefix -> folder under WIKI_DIR
@@ -68,7 +79,27 @@ NOT_BUILT = (
     "<!doctype html><meta charset=utf-8><title>Wiki</title>"
     "<body style='font:16px -apple-system,sans-serif;max-width:36rem;margin:4rem auto'>"
     "<h1>The wiki is being built</h1><p>The first build takes a minute or two. "
-    "Refresh this page shortly.</p></body>"
+    "This page opens the wiki by itself when it is ready.</p></body>"
+)
+# Added to every page of the site: when a new build is served (pages written while a long
+# upload is still being read), a page nobody is reading reloads itself; one being read
+# offers a button instead, so nobody loses their place.
+LIVE_SCRIPT = (
+    "<script>(()=>{if(window.__wikiLive)return;window.__wikiLive=1;let first=null,"
+    "pages=0,touched=0;const mark=()=>{touched=Date.now()};for(const e of"
+    "[\"scroll\",\"keydown\",\"pointerdown\",\"wheel\"])addEventListener(e,mark,{passive:true});"
+    "function show(n){let b=document.getElementById(\"wiki-live\");if(!b){b=document.createElement"
+    "(\"button\");b.id=\"wiki-live\";b.type=\"button\";b.onclick=()=>location.reload();b.style.cssText="
+    "\"position:fixed;right:16px;bottom:16px;z-index:2147483647;font:600 14px -apple-system,"
+    "sans-serif;padding:10px 16px;border-radius:999px;border:0;background:#284b63;color:#fff;"
+    "box-shadow:0 2px 10px rgba(0,0,0,.25);cursor:pointer\";document.body.append(b)}"
+    "b.textContent=\"The wiki was updated\"+(n>0?\" \\u00b7 \"+n+\" new page\"+(n===1?\"\":\"s\"):\"\")"
+    "+\" \\u00b7 Show\"}async function check(){try{const r=await fetch(\"/.wiki/build\","
+    "{cache:\"no-store\"});if(!r.ok)return;const s=await r.json();if(first===null){first=s.stamp;"
+    "pages=s.pages;return}if(s.stamp===first)return;const quiet=Date.now()-touched>20000&&"
+    "scrollY<40&&!document.querySelector(\"input:focus,textarea:focus,[contenteditable]:focus\");"
+    "if(quiet||!first){location.reload();return}show(s.pages-pages)}catch(e){}}"
+    "setInterval(check,5000);check()})()</script>"
 )
 UPLOAD_PAGE = os.path.join(WIKI_DIR, "engine", "upload", "upload.html")
 STATE_DIR = os.path.join(WIKI_DIR, ".wiki-engine", "state")
@@ -234,6 +265,7 @@ def status():
         "maxUploadMb": round(max_upload_bytes() / 1024 / 1024),
         "queue": {k: list_queue(v) for k, v in QUEUES.items()},
         "needsReview": list_queue("raw/_needs-review"),
+        "review": {"open": wiki_review.count_open(), "rev": wiki_review.revision()},
         "runner": runner_state(),
         "now": wiki_events.read_now(),
     }
@@ -241,6 +273,209 @@ def status():
 
 def is_inline(ctype):
     return ctype.split(";")[0].strip().lower() in INLINE_TYPES
+
+
+_build = {"key": None, "info": {"stamp": "", "pages": 0}}
+
+
+def build_info():
+    """Which build of the site is served. The runner swaps public/ in one step, so the
+    folder's identity and its index page's time change together."""
+    public = os.path.join(WIKI_DIR, "public")
+    try:
+        key = (os.stat(public).st_ino, os.stat(os.path.join(public, "index.html")).st_mtime_ns)
+    except OSError:
+        return {"stamp": "", "pages": 0}
+    if key != _build["key"]:
+        pages = 0
+        for _, _, files in os.walk(public):
+            pages += sum(1 for f in files if f.endswith(".html") and f != "404.html")
+        _build.update(key=key, info={"stamp": f"{key[0]}-{key[1]}", "pages": pages})
+    return _build["info"]
+
+
+def with_live_script(html):
+    i = html.rfind(b"</body>")
+    return html[:i] + LIVE_SCRIPT.encode() + html[i:] if i >= 0 else html + LIVE_SCRIPT.encode()
+
+
+# ------------------------------------------------------------------- settings ------
+CONFIG_LOCK = threading.Lock()
+# What the Settings panel may change: key -> (type, low, high). Everything else in
+# wiki.config.json (engine, port, the local model) stays as the installer wrote it.
+SETTABLE = {"parallelBatches": (int, 1, 6), "docsPerBatch": (int, 1, 50),
+            "maxUploadMb": (int, 1, 4096), "maxSpendPerBatchUsd": (float, 0.5, 100.0)}
+LABELS = {"parallelBatches": "batches read at once", "docsPerBatch": "documents per batch",
+          "maxUploadMb": "the upload limit in MB", "maxSpendPerBatchUsd": "the spending cap per batch in USD"}
+
+
+def number(v, kind, default):
+    try:
+        return kind(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def settings_view():
+    cfg = load_config()
+    engine = cfg.get("engine") or "claude"
+    spend = cfg.get("maxSpendPerBatchUsd", cfg.get("maxSpendPerRunUsd", 5))
+    return {
+        "engine": engine,
+        "title": cfg.get("title") or "",
+        "company": cfg.get("company") or "",
+        "parallelBatches": max(1, min(6, number(cfg.get("parallelBatches"), int, 3))),
+        "docsPerBatch": number(cfg.get("docsPerBatch"), int, 0) or (20 if engine == "local" else 8),
+        "maxUploadMb": round(max_upload_bytes() / 1024 / 1024),
+        "maxSpendPerBatchUsd": number(spend, float, 5.0),
+        "review": wiki_jev.review_settings(cfg),
+        "jev": {"available": wiki_jev.available(cfg), "key": bool(KEY.get())},
+    }
+
+
+def clean_text(v, limit):
+    v = "".join(ch for ch in str(v) if ch >= " " and ch != "\x7f").strip()
+    return v[:limit]
+
+
+def change_settings(body):
+    """Apply the owner's changes to wiki.config.json. Returns (changed keys, errors)."""
+    if not isinstance(body, dict):
+        return [], ["the settings were not sent as an object"]
+    errors, updates = [], {}
+    if "title" in body:
+        t = clean_text(body["title"], 80)
+        if t:
+            updates["title"] = t
+        else:
+            errors.append("the title cannot be empty")
+    if "company" in body:
+        updates["company"] = clean_text(body["company"], 120)
+    for k, (kind, lo, hi) in SETTABLE.items():
+        if k in body:
+            v = number(body[k], kind, None)
+            if v is None or v != v or not lo <= v <= hi:
+                errors.append(f"{LABELS[k]} must be between {lo:g} and {hi:g}")
+            else:
+                updates[k] = round(v, 2) if kind is float else v
+    if isinstance(body.get("review"), dict):
+        r = dict(wiki_jev.review_settings())
+        mode = body["review"].get("mode", r["mode"])
+        bar = number(body["review"].get("autoConfidence", r["autoConfidence"]), float, None)
+        if mode not in ("auto", "manual"):
+            errors.append("the review mode must be auto or manual")
+        elif bar is None or not 0.5 <= bar <= 0.99:
+            errors.append("the auto-review confidence must be between 50% and 99%")
+        else:
+            updates["review"] = {"mode": mode, "autoConfidence": round(bar, 2)}
+    if errors:
+        return [], errors
+    path = os.path.join(WIKI_DIR, "wiki.config.json")
+    with CONFIG_LOCK:
+        try:
+            with open(path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            return [], ["wiki.config.json could not be read; fix or restore it first"]
+        changed = [k for k, v in updates.items() if cfg.get(k) != v]
+        if changed:
+            cfg.update(updates)
+            if "maxSpendPerBatchUsd" in changed:
+                cfg.pop("maxSpendPerRunUsd", None)   # the older name, now replaced
+            tmp = path + f".{secrets.token_hex(4)}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+            os.replace(tmp, path)
+    return changed, []
+
+
+class KeyCache:
+    """The TypeSafe key, read from the Keychain at most once a minute."""
+
+    def __init__(self):
+        self.value, self.at, self.lock = "", 0.0, threading.Lock()
+
+    def get(self):
+        with self.lock:
+            if time.time() - self.at > 60:
+                self.value, self.at = wiki_jev.get_key(), time.time()
+            return self.value
+
+    def forget(self):
+        with self.lock:
+            self.at = 0.0
+
+
+KEY = KeyCache()
+
+
+class ReviewWorker(threading.Thread):
+    """Scores new review questions with Jev as soon as they appear, and in auto mode
+    applies the answers it is sure enough of."""
+    daemon = True
+
+    def __init__(self):
+        super().__init__(name="review")
+        self.wake, self.force = threading.Event(), set()
+        self.busy, self.error = False, ""
+
+    def nudge(self, ids=()):
+        self.force |= set(ids)
+        self.wake.set()
+
+    def run(self):
+        while True:
+            self.wake.wait(5)
+            self.wake.clear()
+            try:
+                self.step()
+            except Exception as e:  # never let one bad item stop the worker
+                self.busy = False
+                wiki_events.log(f"review worker: {e!r}")
+
+    def step(self):
+        if not wiki_jev.available():
+            return
+        items = wiki_review.list_open()
+        rs = wiki_jev.review_settings()
+        force, self.force = self.force, set()
+        due = [i for i in items if wiki_jev.needs_score(i, i["id"] in force)]
+        ready = rs["mode"] == "auto" and any(wiki_jev.auto_answer(i, rs["autoConfidence"]) for i in items)
+        key = KEY.get() if due else ""
+        if not (due and key) and not ready:
+            return
+        self.busy = True
+        summary = wiki_jev.run(force_ids=force, key=key)
+        self.busy = False
+        if due and key:
+            self.error = summary["error"]
+        if summary["queued"]:
+            start_runner()
+
+
+WORKER = ReviewWorker()
+
+
+def review_view():
+    cfg = load_config()
+    return {
+        "items": wiki_review.list_open(),
+        "done": wiki_review.list_done(30),
+        "engine": cfg.get("engine") or "claude",
+        "review": wiki_jev.review_settings(cfg),
+        "jev": {"available": wiki_jev.available(cfg), "key": bool(KEY.get()),
+                "busy": WORKER.busy, "error": WORKER.error},
+        "rev": wiki_review.revision(),
+    }
+
+
+def rebuild_site():
+    """Rebuild the site in the background (the title is built into its pages). A run in
+    progress rebuilds at its end anyway; this one then exits at once."""
+    subprocess.Popen(["/bin/bash", os.path.join(WIKI_DIR, "scripts", "wiki_runner.sh"), "--rebuild"],
+                     cwd=WIKI_DIR, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 def start_runner():
@@ -321,6 +556,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ctype = EXTRA_TYPES.get(ext) or mimetypes.guess_type(path)[0] or "application/octet-stream"
         if ctype.startswith("text/") and "charset" not in ctype:
             ctype += "; charset=utf-8"
+        if not original and ext == ".html":
+            with open(path, "rb") as f:
+                return self._send_bytes(status, ctype, with_live_script(f.read()), head_only)
         size = os.path.getsize(path)
         extra = None
         if original:
@@ -423,6 +661,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self._forbid(head_only, "Forbidden: open the Upload page from the wiki")
                 if rel == "api/status":
                     return self._send_json(200, status())
+                if rel == "api/review":
+                    return self._send_json(200, review_view())
+                if rel == "api/settings":
+                    return self._send_json(200, settings_view())
                 if rel == "api/events" and not head_only:
                     return self._stream_events(query)
                 return self._send_bytes(404, "text/plain; charset=utf-8", b"Not found\n", head_only)
@@ -435,6 +677,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                         "use by another program. Set \"uploadPort\" in wiki.config.json to a "
                                         "free port and restart the Mac.\n".encode(), head_only)
             return self._redirect(self._origin_for(self.server.app_port) + "/upload", head_only)
+        if rel == ".wiki/build":
+            return self._send_json(200, build_info())
         top = rel.split("/", 1)[0]
         if top in ROOTS:
             sub = rel.split("/", 1)[1] if "/" in rel else ""
@@ -446,7 +690,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._not_found(head_only)
         p = self._resolve_site(rel)
         if p == "NOT_BUILT":
-            return self._send_bytes(503, "text/html; charset=utf-8", NOT_BUILT.encode(), head_only)
+            return self._send_bytes(503, "text/html; charset=utf-8", with_live_script(NOT_BUILT.encode()),
+                                    head_only)
         if p is None:
             return self._not_found(head_only)
         return self._send_file(p, head_only)
@@ -523,7 +768,80 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if rel == "api/process":
             wiki_events.emit("process-requested")
             return self._send_json(200, {"ok": True, "runner": start_runner()})
+        if rel in ("api/review/answer", "api/review/score", "api/settings", "api/settings/jev-key"):
+            body = self._read_json()
+            if body is None:
+                return self._send_json(400, {"ok": False, "message": "The request was not valid JSON."})
+            return getattr(self, "_" + rel[4:].replace("/", "_").replace("-", "_"))(body)
         self._send_bytes(404, "text/plain; charset=utf-8", b"Not found\n", False)
+
+    def _read_json(self, limit=65536):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return None
+        if length > limit:
+            self.close_connection = True
+            return None
+        try:
+            body = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return body if isinstance(body, dict) else None
+
+    def _review_answer(self, body):
+        res = wiki_review.answer(str(body.get("id") or ""), key=body.get("key") or "",
+                                 text=str(body.get("text") or "")[:2000], by="owner")
+        if res.get("queued"):
+            start_runner()
+        return self._send_json(200 if res["ok"] else 409, res)
+
+    def _review_score(self, body):
+        if not wiki_jev.available():
+            return self._send_json(409, {"ok": False, "message":
+                                         "This wiki reads with the model on this Mac, so nothing is sent to Jev."})
+        if not KEY.get():
+            return self._send_json(409, {"ok": False, "message": "Add a TypeSafe API key in Settings first."})
+        ids = body.get("ids")
+        ids = [i for i in ids if isinstance(i, str)] if isinstance(ids, list) else \
+            [i["id"] for i in wiki_review.list_open()]
+        WORKER.error = ""
+        WORKER.nudge(ids)
+        return self._send_json(200, {"ok": True, "message": f"Asking Jev about {len(ids)} question(s)."})
+
+    def _settings(self, body):
+        changed, errors = change_settings(body)
+        if errors:
+            msg = "; ".join(errors)
+            return self._send_json(400, {"ok": False, "message": msg[0].upper() + msg[1:] + "."})
+        if "title" in changed and not runner_state()["running"]:
+            rebuild_site()   # a run in progress rebuilds at its end anyway
+        if changed:
+            wiki_events.emit("settings", msg="Settings changed: " + ", ".join(changed))
+        WORKER.nudge()
+        return self._send_json(200, {"ok": True, "changed": changed, "settings": settings_view()})
+
+    def _settings_jev_key(self, body):
+        key = "".join(str(body.get("key") or "").split())
+        if not key:
+            wiki_jev.delete_key()
+            KEY.forget()
+            wiki_events.emit("settings", msg="The TypeSafe API key was removed")
+            return self._send_json(200, {"ok": True, "message": "The key was removed.",
+                                         "settings": settings_view()})
+        if len(key) > 512 or not key.isprintable():
+            return self._send_json(400, {"ok": False, "message": "That does not look like an API key."})
+        ok, message = wiki_jev.test_key(key)
+        if not ok and "did not accept" in message:
+            return self._send_json(400, {"ok": False, "message": message[0].upper() + message[1:] + "."})
+        if not wiki_jev.set_key(key):
+            return self._send_json(500, {"ok": False, "message": "The key could not be saved in the Keychain."})
+        KEY.forget()
+        WORKER.nudge()
+        wiki_events.emit("settings", msg="A TypeSafe API key was saved in the Keychain")
+        message = ("Saved in the Keychain. " + message) if ok else \
+            f"Saved in the Keychain, but it could not be checked just now ({message})."
+        return self._send_json(200, {"ok": True, "message": message, "settings": settings_view()})
 
     def _upload(self, query):
         name, why = clean_upload_name((query.get("name") or [""])[0])
@@ -636,6 +954,7 @@ def main():
     try:
         app = Server((BIND, app_port), "app", a.port, app_port)
         threading.Thread(target=app.serve_forever, daemon=True).start()
+        WORKER.start()
     except OSError as e:  # the wiki stays readable even if the Upload port is taken
         site.app_running = False
         print(f"wiki: the Upload page could not start on port {app_port}: {e}", file=sys.stderr, flush=True)

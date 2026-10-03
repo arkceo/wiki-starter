@@ -18,7 +18,8 @@
 #   5. has Claude apply Update Packets, five at a time (engine/prompts/ingest.md);
 #   6. parks anything that failed twice in raw/_needs-review/ and says so in
 #      wiki/_review.md, so a broken file never burns money every 15 minutes (only a
-#      batch that actually ran counts as a try for its files);
+#      batch that actually ran counts as a try for its files), with a review item the
+#      owner (or Jev) answers on the Upload page (scripts/wiki_review.py);
 #   7. records newly filed documents in archive/ingestion-ledger.csv, tidies
 #      frontmatter, refreshes the ingestion register;
 #   8. commits the change to the folder's local git history (never pushed anywhere);
@@ -320,10 +321,19 @@ now_file() {
     "$STATE_DIR/now.json" 2>/dev/null
 }
 
+# Claude Code settings adding the Write guard as a PreToolUse hook (JSON, paths quoted).
+guard_settings() {
+  "$PY" - "$PY" "$WIKI_DIR/scripts/wiki_guard.py" <<'PYEOF'
+import json, shlex, sys
+cmd = " ".join(shlex.quote(a) for a in sys.argv[1:3])
+print(json.dumps({"hooks": {"PreToolUse": [{"matcher": "Write", "hooks": [{"type": "command", "command": cmd}]}]}}))
+PYEOF
+}
+
 # One Claude call. Returns 0 done; 3 stopped at its turn or spending cap (it ran, so its
 # files count as tried); 4 stopped by the watchdog; 1 Claude could not run.
-run_claude() { # label prompt-file max-turns
-  local label="$1" prompt_file="$2" turns="$3" budget pid fpid waited=0 rc outcome stopped=0
+run_claude() { # label prompt-file max-turns [batch-file]
+  local label="$1" prompt_file="$2" turns="$3" batch="${4:-}" budget pid fpid waited=0 rc outcome stopped=0
   local tag; tag=$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '_')
   # Several sessions can run at once: each has its own stream, and its own record of
   # the file it is on (the shared live line may be showing another session's).
@@ -341,7 +351,12 @@ run_claude() { # label prompt-file max-turns
   : > "$stream"; : > "$current"
   # Claude's actions stream to a file, and a follower turns them into events and log
   # lines. The watchdog below watches claude itself, never the follower.
+  # While sessions overlap, a hook refuses Write on a page that already exists
+  # (scripts/wiki_guard.py): two sessions creating the same page must not replace it.
+  local guard=""
+  [ "${LANES:-1}" -gt 1 ] && guard=$(guard_settings)
   "$CLAUDE_BIN" -p "$(cat "$prompt_file")" \
+    ${guard:+--settings "$guard"} \
     --permission-mode dontAsk \
     --allowedTools "$ALLOWED_TOOLS" \
     --max-turns "$turns" \
@@ -350,7 +365,7 @@ run_claude() { # label prompt-file max-turns
     > "$stream" 2>> "$LOG_FILE" < /dev/null &
   pid=$!
   "$PY" scripts/wiki_events.py claude-stream --file "$stream" --pid "$pid" --label "$label" \
-    --current "$current" >> "$LOG_FILE" 2>&1 &
+    --current "$current" ${batch:+--batch "$batch"} >> "$LOG_FILE" 2>&1 &
   fpid=$!
   while kill -0 "$pid" 2>/dev/null; do
     sleep 2; waited=$((waited + 2))   # short: a finished batch frees its lane quickly
@@ -451,17 +466,22 @@ park_repeat_failures() {
     dest="raw/_needs-review/$b"
     [ -e "$dest" ] && dest="raw/_needs-review/$(date +%Y%m%d%H%M%S)-$b"
     mv "$p" "$dest" || continue
+    rid=$("$PY" scripts/wiki_review.py park --file "$p" --to "$dest" --attempts "$n" --engine "$ENGINE" 2>> "$LOG_FILE")
     {
       printf '\n## [%s] needs-review | general | %s | could not be processed after %s attempts\n' "$today" "$dest" "$n"
       printf -- '- The runner tried %s times and the file is still unprocessed, so it was moved out of the queue to stop retrying.\n' "$n"
-      printf -- '- Check that it opens and is readable, then upload it again (Upload, top right of the wiki).\n'
+      if [ -n "$rid" ]; then
+        printf -- '- Review item: `%s`. Answer it on the Upload page, in the Review tab: read it again, set it aside, or say what it is.\n' "$rid"
+      else
+        printf -- '- Check that it opens and is readable, then upload it again (Upload, top right of the wiki).\n'
+      fi
     } >> wiki/_review.md
-    log "parked $p -> $dest after $n attempts"
-    ev parked file="$p" to="$dest" attempts:="$n"
+    log "parked $p -> $dest after $n attempts${rid:+ (review item $rid)}"
+    ev parked file="$p" to="$dest" attempts:="$n" review="$rid"
     parked=$((parked + 1))
   done < "$ATTEMPTS_FILE"
   if [ "$parked" -gt 0 ]; then
-    notify "Wiki needs attention" "$parked file(s) could not be processed and were moved to raw/_needs-review. See the Review queue."
+    notify "Wiki needs attention" "$parked file(s) could not be processed. Answer what to do with them in the Upload page's Review tab."
   fi
 }
 
@@ -506,11 +526,12 @@ tidy() {
   "$PY" scripts/build_ingestion_register.py >> "$LOG_FILE" 2>&1 || log "ingestion register failed"
   # Folders dropped into Intake leave empty shells behind once their files are filed.
   find raw/_intake -mindepth 1 -type d -empty -delete 2>/dev/null || true
+  "$PY" scripts/wiki_review.py tidy >> "$LOG_FILE" 2>&1 || true
 }
 
 commit_changes() { # message
   [ -d .git ] || return 0
-  git add -A -- wiki index.md log.md archive generated >> "$LOG_FILE" 2>&1 || true
+  git add -A -- wiki index.md log.md archive generated review >> "$LOG_FILE" 2>&1 || true
   if git diff --cached --quiet; then return 0; fi
   nowp commit detail="recording this version in the wiki's history"
   git -c user.name="Wiki runner" -c user.email="runner@localhost" \
@@ -545,13 +566,23 @@ build_site() { # [quiet]: a rebuild during a run, which leaves the live line alo
   return 1
 }
 
+# Whose wiki this is (Settings, "company" in wiki.config.json), so Claude can tell the
+# owner's business from the other companies in a document.
+business_note() {
+  local c; c=$(config_value company "")
+  [ -n "$c" ] && printf '\nThis wiki belongs to %s: when a document names it, that is the owner'"'"'s own business.\n' "$c"
+  return 0
+}
+
 # The intake instructions, limited to one batch.
 batch_prompt() { # batch-file
   cat engine/prompts/intake.md
+  business_note
   printf '\nThis run is one batch of a larger upload. Process ONLY these documents, and leave every other file in raw/_intake/ exactly where it is (later batches handle them):\n\n'
   sed 's/^/- /' "$1"
+  "$PY" scripts/wiki_review.py notes --batch "$1" 2>> "$LOG_FILE"
   if [ "${LANES:-1}" -gt 1 ]; then
-    printf '\nOther sessions are filing other batches into this wiki at the same time. Pages you share with them (index.md, log.md, wiki/_review.md, and any company, person, topic or project page) can change while you work: read such a page right before you change it, change it with Edit (never rewrite it whole with Write), and if an edit is refused because the file changed, read it again and redo the edit.\n'
+    printf '\nOther sessions are filing other batches into this wiki at the same time. Pages you share with them (index.md, log.md, wiki/_review.md, and any company, person, topic or project page) can change while you work: read such a page right before you change it, change it with Edit (never rewrite it whole with Write), and if an edit is refused because the file changed, read it again and redo the edit. Write only creates new files: a Write to a file that already exists is refused, because another session may have just created it; read that file and add to it with Edit.\n'
   fi
 }
 
@@ -585,7 +616,7 @@ fi
 
 RUN_ID="run-$(date +%Y%m%d-%H%M%S)"
 export WIKI_RUN_ID="$RUN_ID"
-mkdir -p raw/inbox raw/_intake archive/inbox
+mkdir -p raw/inbox raw/_intake archive/inbox review/open review/done
 route_misfiled
 
 if [ -z "$(list_pending raw/_intake)$(list_pending raw/inbox)" ]; then
@@ -672,7 +703,7 @@ read_batch() { # batch k: runs in the background; leaves its outcome in the lane
     run_local --docs "$BATCH_DIR/$b"; rc=$?
   else
     batch_prompt "$BATCH_DIR/$b" > "$LANE_DIR/$b.prompt.md"
-    run_claude "intake#$k" "$LANE_DIR/$b.prompt.md" 100; rc=$?
+    run_claude "intake#$k" "$LANE_DIR/$b.prompt.md" 100 "$BATCH_DIR/$b"; rc=$?
   fi
   printf '%s' "$STALLED_ON" > "$LANE_DIR/$b.stalled"
   printf '%s' "$rc" > "$LANE_DIR/$b.rc"
@@ -756,7 +787,8 @@ while [ "$CLAUDE_OK" = 1 ] && [ "$round" -lt "$MAX_INGEST_ROUNDS" ]; do
   ROUND_PACKETS=$(list_packets)
   [ -n "$ROUND_PACKETS" ] || break
   round=$((round + 1))
-  run_claude "ingest#$round" engine/prompts/ingest.md 60; rc=$?
+  { cat engine/prompts/ingest.md; business_note; } > "$LANE_DIR/ingest.prompt.md"
+  run_claude "ingest#$round" "$LANE_DIR/ingest.prompt.md" 60; rc=$?
   case "$rc" in
     0|3) printf '%s\n' "$ROUND_PACKETS" >> "$TRIED" ;;
     4) printf '%s\n' "$ROUND_PACKETS" >> "$TRIED"; STOP=stalled; CLAUDE_OK=0; break ;;
@@ -806,7 +838,7 @@ commit_changes "wiki: $(date +%F) $DONE_DOCS document(s), $DONE_PACKETS packet(s
 
 if build_site; then
   if [ $((DONE_DOCS + DONE_PACKETS)) -gt 0 ]; then
-    notify "Wiki updated" "$DONE_DOCS document(s), $DONE_PACKETS packet(s). Refresh the wiki to see them."
+    notify "Wiki updated" "$DONE_DOCS document(s), $DONE_PACKETS packet(s) added. Open wiki pages show them by themselves."
   fi
 else
   notify_error "The wiki was updated but the site could not be rebuilt. See ~/Library/Logs/wiki-starter/runner.log."

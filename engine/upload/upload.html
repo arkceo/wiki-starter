@@ -162,6 +162,99 @@
   #jump[hidden] { display: none; }
   footer { font-size: .78rem; text-align: right; }
 
+  /* Files and Review share the left panel. */
+  .ptabs { display: flex; gap: .25rem; }
+  .ptabs button { font-size: 1rem; background: transparent; border: 0; color: var(--muted); padding: .2rem .65rem; border-radius: 8px; }
+  .ptabs button[aria-selected="true"] { color: var(--text); background: var(--inset); box-shadow: inset 0 0 0 1px var(--line); }
+  .ptabs .muted { font-weight: 400; font-size: .85rem; }
+  .count { display: inline-block; min-width: 1.35rem; padding: 0 .4rem; margin-left: .3rem; border-radius: 999px; font-size: .74rem;
+           line-height: 1.35rem; text-align: center; font-weight: 700; background: var(--bad); color: #fff; vertical-align: .08rem; }
+  .count:empty { display: none; }
+  #files-panel[data-view="review"] #files, #files-panel[data-view="review"] #legend,
+  #files-panel[data-view="review"] #show-all, #files-panel[data-view="files"] #review-view { display: none; }
+  #review-view { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+  .review-head { display: flex; align-items: center; gap: .45rem .9rem; flex-wrap: wrap; padding: .55rem 1rem;
+                 border-bottom: 1px solid var(--line); font-size: .85rem; }
+  #jev-state { flex: 1 1 14rem; }
+  .seg { display: inline-flex; border: 1px solid var(--accent); border-radius: 8px; overflow: hidden; flex: none; }
+  .seg button { border: 0; border-radius: 0; background: transparent; color: var(--accent); padding: .28rem .75rem; font-size: .85rem; }
+  .seg button[aria-checked="true"] { background: var(--accent); color: #fff; }
+  #review-list { list-style: none; margin: 0; padding: 0; overflow: auto; flex: 1 1 auto; min-height: 0; }
+  #review-list li.empty { padding: 1.5rem 1rem; color: var(--muted); text-align: center; }
+  #review-list li.group { position: sticky; top: 0; z-index: 1; padding: .3rem 1rem; font-size: .74rem; font-weight: 700;
+                          letter-spacing: .04em; text-transform: uppercase; color: var(--muted); background: var(--inset);
+                          border-bottom: 1px solid var(--line); }
+  .rv { padding: .8rem 1rem .9rem; border-bottom: 1px solid var(--line); scroll-margin-top: 2rem; }
+  .rv.flash { animation: flash 1.8s ease-out; }
+  @keyframes flash { 0%, 35% { background: var(--accent-soft); } 100% { background: transparent; } }
+  .rv-top { display: flex; flex-wrap: wrap; align-items: center; gap: .2rem .6rem; font-size: .8rem; color: var(--muted); }
+  .rv-kind { font-weight: 700; text-transform: uppercase; letter-spacing: .04em; font-size: .68rem; padding: .05rem .45rem;
+             border-radius: 999px; background: var(--warn-soft); color: var(--warn); }
+  .rv-kind.k-unreadable { background: var(--bad-soft); color: var(--bad); }
+  .rv-id { font: .72rem var(--mono); }
+  .rv-q { font-weight: 650; margin: .35rem 0 .3rem; }
+  .rv-ctx { font-size: .85rem; color: var(--muted); margin: 0 0 .55rem; overflow-wrap: anywhere; }
+  .rv-ctx summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+  .rv-ctx p { margin: .3rem 0 0; }
+  .rv-opts { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .35rem; min-width: 0; }
+  .rv-opt { display: grid; grid-template-columns: 1.1rem minmax(0, 1fr) 6.5rem 2.9rem; gap: .1rem .6rem; align-items: center;
+            padding: .45rem .65rem; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; background: var(--inset); }
+  .rv-opt:has(input:checked) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .rv-opt input[type=radio] { margin: 0; accent-color: var(--accent); }
+  .rv-opt .lbl { font-weight: 600; overflow-wrap: anywhere; }
+  .rv-opt .eff { grid-column: 2 / -1; font-size: .8rem; color: var(--muted); }
+  .rv-opt .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+  .rv-opt .bar i { display: block; height: 100%; background: var(--accent); }
+  .rv-opt.top .bar i { background: var(--ok); }
+  .rv-opt .pct { font-variant-numeric: tabular-nums; font-weight: 700; text-align: right; font-size: .85rem; }
+  .rv-opt.other { grid-template-columns: 1.1rem minmax(0, 1fr); }
+  .rv-opt.other textarea { width: 100%; font: inherit; font-size: .9rem; padding: .35rem .5rem; margin-top: .3rem; resize: vertical;
+                           border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); }
+  .tag { font-style: normal; font-size: .66rem; font-weight: 700; padding: .05rem .4rem; border-radius: 999px; margin-left: .35rem;
+         background: var(--ok-soft); color: var(--ok); vertical-align: .1rem; white-space: nowrap; }
+  .tag.sugg { background: var(--accent-soft); color: var(--accent); }
+  .rv-actions { display: flex; align-items: center; gap: .75rem; margin-top: .55rem; flex-wrap: wrap; font-size: .85rem; }
+  .rv-actions .bad { color: var(--bad); }
+  .rv-done { padding: .5rem 1rem; border-bottom: 1px solid var(--line); font-size: .85rem; display: grid;
+             grid-template-columns: 1.1rem minmax(0, 1fr); gap: .1rem .5rem; }
+  .rv-done .ic { color: var(--ok); }
+  .rv-done .who { color: var(--muted); font-size: .8rem; grid-column: 2; }
+  a.stage { text-decoration: underline; font-weight: 600; }
+
+  /* Settings */
+  .gear { background: transparent; color: var(--accent); border: 1px solid var(--line); padding: .3rem .75rem; font-weight: 600; }
+  dialog#settings { border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(40rem, calc(100vw - 32px));
+                    max-height: calc(100vh - 48px); background: var(--panel); color: var(--text); }
+  dialog#settings::backdrop { background: rgba(0, 0, 0, .4); }
+  .set-form { display: flex; flex-direction: column; max-height: calc(100vh - 50px); margin: 0; }
+  .set-head, .set-foot { padding: .85rem 1.2rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex: none; }
+  .set-head { border-bottom: 1px solid var(--line); }
+  .set-foot { border-top: 1px solid var(--line); flex-wrap: wrap; }
+  .set-body { overflow: auto; padding: 0 1.2rem; }
+  .set-sec { padding: .9rem 0; border-bottom: 1px solid var(--line); }
+  .set-sec:last-child { border-bottom: 0; }
+  .set-sec h3 { font-size: .95rem; margin: 0 0 .4rem; }
+  .set-sec .help { font-size: .82rem; color: var(--muted); margin: .4rem 0 0; }
+  .set-sec[aria-disabled="true"] .ctl { opacity: .5; pointer-events: none; }
+  .slider { position: relative; padding-bottom: 1.5rem; }
+  .slider input[type=range] { width: 100%; margin: .2rem 0; accent-color: var(--accent); }
+  .slider .tick { position: absolute; bottom: 0; font-size: .78rem; color: var(--muted); white-space: nowrap; }
+  .slider .tick.t1 { left: 0; } .slider .tick.t3 { left: 40%; transform: translateX(-50%); } .slider .tick.t6 { right: 0; }
+  .readout { font-weight: 700; color: var(--accent); }
+  .field { display: grid; grid-template-columns: 12rem minmax(0, 1fr); gap: .4rem .8rem; align-items: center; margin: .45rem 0; font-size: .9rem; }
+  .field input[type=text], .field input[type=number], .keyrow input { font: inherit; padding: .4rem .55rem; border: 1px solid var(--line);
+         border-radius: 8px; background: var(--inset); color: var(--text); width: 100%; min-width: 0; }
+  .keyrow { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .45rem; }
+  .keyrow input { flex: 1 1 14rem; }
+  .keyrow button { flex: none; }
+  .radios { display: flex; gap: 1.2rem; flex-wrap: wrap; font-size: .92rem; }
+  .radios label { display: flex; gap: .35rem; align-items: center; cursor: pointer; }
+  details.adv summary { cursor: pointer; font-weight: 700; font-size: .95rem; }
+  #set-msg { font-size: .88rem; }
+  #set-msg.bad, #key-msg.bad { color: var(--bad); }
+  #set-msg.ok, #key-msg.ok { color: var(--ok); }
+  #key-msg { font-size: .85rem; margin-top: .35rem; }
+
   .tabs { display: none; }
   /* A narrow window: one column, and the files and the log share one panel with tabs. */
   @media (max-width: 999px) {
@@ -173,6 +266,10 @@
     .tabs button { flex: 1; }
     .tabs button[aria-selected="false"] { background: transparent; color: var(--accent); }
     .file-main { grid-template-columns: 1.1rem minmax(0, 1fr) auto; }
+    .ptabs { display: none; }
+    .rv-opt { grid-template-columns: 1.1rem minmax(0, 1fr) 2.9rem; }
+    .rv-opt .bar { grid-column: 2 / -1; grid-row: 3; }
+    .field { grid-template-columns: minmax(0, 1fr); }
     .file-main .steps { grid-column: 2 / -1; grid-row: 2; }
     .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
@@ -186,7 +283,9 @@
 <div class="app" id="app" data-tab="files">
   <header class="top">
     <div class="brand"><h1>Upload &amp; Logs</h1><span class="muted" id="wiki-title"></span></div>
-    <div class="top-right"><span class="badge" id="engine"></span><a href="/" id="back">← Back to the wiki</a></div>
+    <div class="top-right"><span class="badge" id="engine"></span>
+      <button type="button" class="gear" id="open-settings" aria-haspopup="dialog">⚙ Settings</button>
+      <a href="/" id="back">← Back to the wiki</a></div>
   </header>
 
   <section class="card status" aria-label="Status">
@@ -224,18 +323,34 @@
     <input type="file" id="folder-input" webkitdirectory multiple>
   </section>
 
-  <div class="tabs" role="tablist" aria-label="Files or log">
-    <button type="button" role="tab" data-tab="files" aria-selected="true">Files</button>
+  <div class="tabs" role="tablist" aria-label="Files, review or log">
+    <button type="button" role="tab" data-tab="files" data-view="files" aria-selected="true">Files</button>
+    <button type="button" role="tab" data-tab="files" data-view="review" aria-selected="false">Review<span class="count review-count"></span></button>
     <button type="button" role="tab" data-tab="log" aria-selected="false">Live log</button>
   </div>
 
-  <section class="card panel" id="files-panel" aria-labelledby="files-h">
+  <section class="card panel" id="files-panel" data-view="files" aria-labelledby="files-h">
     <div class="panel-head">
-      <h2 id="files-h">Files <span class="muted" id="files-count"></span></h2>
+      <h2 class="sr" id="files-h">Files and review</h2>
+      <div class="ptabs" role="tablist" aria-label="Files or review">
+        <button type="button" role="tab" data-view="files" aria-selected="true">Files <span class="muted" id="files-count"></span></button>
+        <button type="button" role="tab" data-view="review" aria-selected="false">Review<span class="count review-count"></span></button>
+      </div>
       <button type="button" class="linkish" id="show-all" hidden>Show all files</button>
     </div>
     <div class="legend" id="legend">Stages: Upload → Convert → Read &amp; write → File. Update Packets: Upload → Read → Apply.</div>
     <ul id="files"></ul>
+    <div id="review-view">
+      <div class="review-head">
+        <div class="seg" role="radiogroup" aria-label="How review questions are answered">
+          <button type="button" role="radio" data-mode="manual" aria-checked="true">Manual</button>
+          <button type="button" role="radio" data-mode="auto" aria-checked="false">Auto-review</button>
+        </div>
+        <span id="jev-state" class="muted"></span>
+        <button type="button" class="linkish" id="ask-jev" hidden>Ask Jev again</button>
+      </div>
+      <ul id="review-list" aria-live="off"></ul>
+    </div>
   </section>
 
   <section class="card panel" id="log-panel" aria-labelledby="log-h">
@@ -248,6 +363,73 @@
   </section>
 </div>
 <div id="overlay" hidden><div>Drop to upload</div></div>
+
+<dialog id="settings" aria-labelledby="set-title">
+  <form method="dialog" class="set-form" id="set-form" novalidate>
+    <div class="set-head"><h2 id="set-title">Settings</h2>
+      <button type="button" class="secondary" id="set-close" aria-label="Close settings">✕</button></div>
+    <div class="set-body">
+      <section class="set-sec" id="sec-speed">
+        <h3>Reading speed</h3>
+        <div class="ctl slider">
+          <label class="sr" for="set-lanes">Batches read at once</label>
+          <input type="range" id="set-lanes" min="1" max="6" step="1" value="3">
+          <span class="tick t1">1 · Slowest</span><span class="tick t3">3 · Moderate</span><span class="tick t6">6 · Fastest</span>
+        </div>
+        <p class="help" id="speed-help"></p>
+      </section>
+      <section class="set-sec" id="sec-review">
+        <h3>Review questions</h3>
+        <div class="ctl radios" role="radiogroup" aria-label="Review mode">
+          <label><input type="radio" name="set-mode" value="manual"> Manual: I answer them</label>
+          <label><input type="radio" name="set-mode" value="auto"> Auto-review: Jev answers</label>
+        </div>
+        <div class="ctl slider" id="bar-wrap" style="margin-top:.6rem">
+          <label for="set-bar" style="font-size:.9rem">Apply Jev's answer when its confidence is at least <span class="readout" id="bar-readout">70%</span></label>
+          <input type="range" id="set-bar" min="50" max="95" step="5" value="70">
+          <span class="tick t1">50%</span><span class="tick t6">95%</span>
+        </div>
+        <p class="help">Auto-review only answers questions the documents themselves settle: Jev checks that
+          first. A question that needs your own knowledge or decision (which terms you agreed, what a photo
+          is for) always waits for you, however confident Jev is. A file is never deleted:
+          the most auto-review does with one is set it aside in <code>raw/_set-aside/</code>.</p>
+      </section>
+      <section class="set-sec" id="sec-jev">
+        <h3>Jev, the review judge (TypeSafe)</h3>
+        <div id="key-state" style="font-size:.9rem"></div>
+        <div class="ctl keyrow">
+          <label class="sr" for="set-key">TypeSafe API key</label>
+          <input type="password" id="set-key" autocomplete="off" spellcheck="false" placeholder="Paste a TypeSafe API key">
+          <button type="button" id="key-save">Save key</button>
+          <button type="button" class="secondary" id="key-remove">Remove</button>
+        </div>
+        <div id="key-msg" role="status"></div>
+        <p class="help" id="jev-help">With a key, each review question, its options, and the parts of the wiki and the
+          document it is about are sent to TypeSafe to be scored. Nothing else is sent, and nothing is sent without a
+          key. The key is kept in this Mac's Keychain, not in a file. Get one at console.typesafe.ai.</p>
+      </section>
+      <section class="set-sec">
+        <h3>This wiki</h3>
+        <div class="field"><label for="set-title-in">Title</label><input type="text" id="set-title-in" maxlength="80"></div>
+        <div class="field"><label for="set-company">Your company's name</label><input type="text" id="set-company" maxlength="120"></div>
+        <p class="help">The company name helps the reader tell your own business from the others in a document.
+          A new title shows once the site is rebuilt, in a minute or so.</p>
+        <p class="help" id="engine-help"></p>
+      </section>
+      <section class="set-sec">
+        <details class="adv"><summary>Advanced</summary>
+          <div class="field"><label for="set-docs">Documents per batch</label><input type="number" id="set-docs" min="1" max="50" step="1"></div>
+          <div class="field"><label for="set-mb">Largest upload (MB)</label><input type="number" id="set-mb" min="1" max="4096" step="1"></div>
+          <div class="field" id="spend-field"><label for="set-spend">Spending cap per batch (USD)</label><input type="number" id="set-spend" min="0.5" max="100" step="0.5"></div>
+          <p class="help">Changes apply from the next batch. A batch that reaches its spending cap stops, and its
+            unfinished files are tried again later.</p>
+        </details>
+      </section>
+    </div>
+    <div class="set-foot"><span id="set-msg" role="status"></span>
+      <span><button type="button" class="secondary" id="set-cancel">Cancel</button> <button type="submit" id="set-save">Save</button></span></div>
+  </form>
+</dialog>
 
 <script>
 (() => {
@@ -425,6 +607,13 @@
     st.textContent = rowLabel(r)
     st.title = st.textContent
     labelEls.set(r.key, [st, r])
+    const questions = itemsForRow(r)
+    let stEl = st
+    if (r.final === "parked" && questions.length) {
+      stEl = reviewLink(questions[0].id, "Needs review →")
+      stEl.className = "stage " + FINAL.parked
+      stEl.title = "Open its question in the Review tab"
+    }
     let [finished, active] = r.final === "failed" || r.final === "skipped" || r.final === "duplicate" ? [0, -1]
       : (PLACE[r.kind][r.state] || [1, -1])
     if (r.final === "parked" || r.retry) active = -1
@@ -441,7 +630,7 @@
       }
       bar.append(sp)
     })
-    main.append(ic, nm, bar, st)
+    main.append(ic, nm, bar, stEl)
     li.append(main)
     const det = document.createElement("div"); det.className = "detail"
     const add = (node) => { const sp = document.createElement("span"); sp.append(node); det.append(sp) }
@@ -454,6 +643,8 @@
       const a = document.createElement("a"); a.href = pageUrl(p); a.textContent = humanPage(p); a.title = p; add(a)
     }
     if (r.links.length > 8) add(`+${r.links.length - 8} more pages`)
+    if (r.final !== "parked" && questions.length)
+      add(reviewLink(questions[0].id, `${questions.length} question${questions.length === 1 ? "" : "s"} to review`))
     if (det.childNodes.length) li.append(det)
     return li
   }
@@ -523,17 +714,23 @@
     filter = filter === f ? "" : f
     for (const t of document.querySelectorAll(".tile")) t.setAttribute("aria-pressed", String(t.dataset.filter === filter))
     filesEl.scrollTop = 0
-    if (filter) setTab("files")
+    if (filter) setTab("files", "files")
     render()
   }
   for (const t of document.querySelectorAll(".tile")) t.onclick = () => setFilter(t.dataset.filter)
   $("show-all").onclick = () => setFilter(filter)
-  function setTab(tab) {
+  const filesPanel = $("files-panel")
+  function setTab(tab, view) {
     app.dataset.tab = tab
-    for (const b of document.querySelectorAll(".tabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === tab))
+    if (view) filesPanel.dataset.view = view
+    const v = filesPanel.dataset.view
+    for (const b of document.querySelectorAll(".tabs button"))
+      b.setAttribute("aria-selected", String(b.dataset.tab === tab && (tab === "log" || b.dataset.view === v)))
+    for (const b of document.querySelectorAll(".ptabs button")) b.setAttribute("aria-selected", String(b.dataset.view === v))
     if (tab === "log") toLatest()
   }
-  for (const b of document.querySelectorAll(".tabs button")) b.onclick = () => setTab(b.dataset.tab)
+  for (const b of document.querySelectorAll(".tabs button")) b.onclick = () => setTab(b.dataset.tab, b.dataset.view)
+  for (const b of document.querySelectorAll(".ptabs button")) b.onclick = () => setTab("files", b.dataset.view)
 
   // ------------------------------------------------------------------ live line
   let glyph = 0
@@ -611,7 +808,7 @@
   // The log follows new lines until the reader scrolls up; "Latest" brings it back.
   let follow = true
   const toLatest = () => { logEl.scrollTop = logEl.scrollHeight; follow = true; $("jump").hidden = true }
-  function logLine(t, text, cls) {
+  function logLine(t, text, cls, reviewId) {
     const old = t && new Date(t).getTime() < openedAt
     if (!old && !dividerShown && logEl.childNodes.length) {
       const d = document.createElement("div"); d.className = "divider"; d.textContent = "Earlier activity above · live from here"
@@ -623,6 +820,7 @@
     const ts = document.createElement("span"); ts.className = "t"
     ts.textContent = (t ? t.slice(11, 19) : new Date().toTimeString().slice(0, 8)) + "  "
     const msg = document.createElement("span"); if (cls) msg.className = cls; msg.textContent = text
+    if (reviewId) { msg.append(" · "); msg.append(reviewLink(reviewId, "Review it")) }
     line.append(ts, msg)
     logEl.append(line)
     while (logEl.childNodes.length > 2000) logEl.firstChild.remove()
@@ -653,7 +851,9 @@
         if (e.duplicate) { logLine(e.t, `${e.name ? base(e.name) : n}: the same file is already queued`, "warn"); break }
         const r = row(f, e.name ? base(e.name) : n)
         r.size = e.bytes || r.size
-        setState(r, "queued", e.t); logLine(e.t, `Uploaded ${r.name} (${fmtSize(e.bytes || 0)})`)
+        setState(r, "queued", e.t)
+        if (e.via === "review") r.note = "An answer from the Review tab"
+        else logLine(e.t, `Uploaded ${r.name} (${fmtSize(e.bytes || 0)})`)
         break
       }
       case "waiting": logLine(e.t, "Waiting for files to finish copying…"); break
@@ -672,7 +872,21 @@
         else setState(r, r.kind === "doc" ? "waiting-convert" : "queued", e.t)
         break
       }
-      case "routed": { rekey(f, e.to); logLine(e.t, `Moved ${n} to the ${isPacketPath(e.to) ? "packet" : "document"} queue`); break }
+      case "routed": {
+        if (f.startsWith("raw/_needs-review/")) {
+          // Sent back from the Review tab: its row starts over.
+          let r = null
+          for (const x of rows.values()) if (x.to === f || x.key === e.to) r = x
+          if (r) {
+            r = rekey(r.key, e.to) || r
+            r.final = ""; r.to = ""; r.retry = false; r.note = "Sent back from the Review tab to be read again"
+            setState(r, "queued", e.t, true)
+          }
+          logLine(e.t, `${n} goes back into the queue to be read again`)
+          break
+        }
+        rekey(f, e.to); logLine(e.t, `Moved ${n} to the ${isPacketPath(e.to) ? "packet" : "document"} queue`); break
+      }
       case "convert": { setState(row(f), "converting", e.t); logLine(e.t, `Converting ${n} to text`); break }
       case "ocr": {
         const r = row(f); r.pages = e.pages || r.pages; setState(r, "ocr", e.t)
@@ -703,8 +917,9 @@
       case "parked": {
         const r = row(f); r.to = e.to || ""
         finish(r, "parked", e.t)
-        r.note = "Could not be processed; see the Review queue"
-        logLine(e.t, `${n} could not be processed after ${e.attempts || 2} tries; moved to needs-review`, "warn"); break
+        r.note = e.review ? "Could not be read; its question is in the Review tab" : "Could not be processed; see the Review queue"
+        logLine(e.t, `${n} could not be read after ${e.attempts || 2} tries; set aside for review`, "warn", e.review)
+        loadReviewSoon(); break
       }
       case "retry": {
         const r = row(f); r.note = "Not finished; it will be tried again"
@@ -718,7 +933,7 @@
         break
       case "committed": logLine(e.t, "Saved a version of the wiki"); break
       case "build-start": logLine(e.t, "Updating the website…"); break
-      case "build-done": logLine(e.t, "Website updated. Refresh the wiki to see the changes.", "ok"); break
+      case "build-done": logLine(e.t, "Website updated. Open wiki pages show the changes by themselves.", "ok"); break
       case "build-failed": logLine(e.t, "The website could not be rebuilt; the previous version is still shown", "bad"); break
       case "run-end": logLine(e.t, `Done: ${e.docs || 0} document(s), ${e.packets || 0} packet(s)`, "ok"); pollSoon(); break
       case "rerun": logLine(e.t, `${e.count || "More"} file(s) arrived meanwhile; starting again`); break
@@ -727,6 +942,14 @@
         logLine(e.t, "Problem: " + (e.msg || "unknown"), "bad"); break
       }
       case "process-requested": logLine(e.t, "Process now pressed"); break
+      case "review-item": logLine(e.t, `Question for review: ${e.question || e.id}`, "warn", e.id); loadReviewSoon(); break
+      case "review-scored": logLine(e.t, `Jev scored ${e.count} question${e.count === 1 ? "" : "s"}`); loadReviewSoon(); break
+      case "review-score-failed": logLine(e.t, `Jev could not score: ${e.msg || "unknown problem"}`, "warn"); loadReviewSoon(); break
+      case "review-answered": {
+        const who = e.by === "jev" ? `Auto-review (Jev, confidence ${Math.round((e.confidence || 0) * 100)}%)` : "You"
+        logLine(e.t, `${who} answered ${e.id}: ${e.answer || ""}`, "ok"); loadReviewSoon(); break
+      }
+      case "settings": logLine(e.t, e.msg || "Settings changed"); break
       default: if (e.msg) logLine(e.t, e.msg)
     }
     render()
@@ -775,11 +998,16 @@
         $("engine").title = (s.engine === "local" ? "The model on this Mac reads your documents; nothing leaves the Mac."
           : "Claude reads your documents; the text it reads is sent to Anthropic.") + (s.version ? " Engine " + s.version : "")
         const parked = (s.needsReview || []).length
+        const open = (s.review && s.review.open) || 0
+        setReviewCount(open)
+        if (s.review && s.review.rev !== reviewRev) loadReviewSoon()
         const note = $("review-note")
-        note.hidden = !parked
-        if (parked) {
-          note.textContent = `${parked} file${parked === 1 ? " was" : "s were"} set aside after failing twice. `
-          const a = document.createElement("a"); a.href = SITE + "/_review"; a.textContent = "Open the Review queue"
+        note.hidden = !parked && !open
+        if (!note.hidden) {
+          note.textContent = (parked ? `${parked} file${parked === 1 ? " was" : "s were"} set aside after failing twice. ` : "")
+            + (open ? `${open} question${open === 1 ? " is" : "s are"} waiting for an answer. ` : "")
+          const a = document.createElement("a"); a.href = "#review"; a.textContent = "Open the Review tab"
+          a.onclick = (ev) => { ev.preventDefault(); setTab("files", "review") }
           note.append(a)
         }
         $("limit").textContent = `Up to ${s.maxUploadMb} MB per file.`
@@ -901,9 +1129,331 @@
   }
   window.addEventListener("beforeunload", (e) => { if (uploading || queue.length) { e.preventDefault(); e.returnValue = "" } })
 
+
+  // ------------------------------------------------------------------ api
+  async function api(method, path, body) {
+    const opt = { method, cache: "no-store", headers: { "X-Wiki-Token": TOKEN } }
+    if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body) }
+    let data = {}
+    try {
+      const r = await fetch(path, opt)
+      if (r.status === 403) reloadForNewToken()
+      try { data = await r.json() } catch (_) {}
+      data._status = r.status
+    } catch (_) { data = { _status: 0, message: "The wiki on this Mac did not answer." } }
+    return data
+  }
+
+  // ------------------------------------------------------------------ review
+  // Questions the owner (or Jev, in auto-review) settles with one click. Every
+  // "Needs review" label and log line links to its question here.
+  let review = { items: [], done: [], review: { mode: "manual", autoConfidence: 0.7 }, jev: {}, engine: "claude" }
+  let reviewRev = null, reviewTimer = 0, reviewPending = false, reviewMsg = ""
+  const openByFile = new Map()   // document path -> open items about it
+  const drafts = new Map()       // item id -> { key, text } the owner has chosen or typed
+  const reviewList = $("review-list")
+  const KIND = { contradiction: "Contradiction", uncertain: "Not sure", missing: "Missing", unreadable: "Could not be read" }
+  const pct = (x) => Math.round((Number(x) || 0) * 100) + "%"
+
+  function itemsForRow(r) {
+    const out = []
+    for (const k of [r.to, r.key]) for (const it of (k && openByFile.get(k)) || []) if (!out.includes(it)) out.push(it)
+    return out
+  }
+  function reviewLink(id, text) {
+    const a = document.createElement("a")
+    a.href = "#review-" + id; a.textContent = text
+    a.onclick = (ev) => { ev.preventDefault(); showReview(id) }
+    return a
+  }
+  function setReviewCount(n) {
+    for (const el of document.querySelectorAll(".review-count")) el.textContent = n ? String(n) : ""
+    for (const b of document.querySelectorAll('[data-view="review"]'))
+      b.setAttribute("aria-label", n ? `Review, ${n} question${n === 1 ? "" : "s"} waiting` : "Review")
+  }
+  function loadReviewSoon() { clearTimeout(reviewTimer); reviewTimer = setTimeout(loadReview, 250) }
+  async function loadReview() {
+    const r = await api("GET", "/api/review")
+    if (r._status !== 200) return
+    review = r
+    reviewRev = r.rev
+    openByFile.clear()
+    for (const it of r.items) for (const k of [it.file, it.queued]) if (k) {
+      if (!openByFile.has(k)) openByFile.set(k, [])
+      openByFile.get(k).push(it)
+    }
+    for (const id of [...drafts.keys()]) if (!r.items.some((it) => it.id === id)) drafts.delete(id)
+    setReviewCount(r.items.length)
+    renderReview()
+    render()
+    if (pendingShow) showReview(pendingShow)
+  }
+
+  function jevLine() {
+    const j = review.jev || {}, rs = review.review || {}
+    if (!j.available) return "Jev is off: this wiki reads with the model on this Mac, so nothing is sent anywhere. Answer the questions yourself."
+    if (!j.key) return "Add a TypeSafe API key in Settings and Jev will score every answer here."
+    if (j.busy) return "Jev is scoring…"
+    if (j.error) return "Jev could not score some questions: " + j.error + "."
+    return rs.mode === "auto"
+      ? `Auto-review: Jev's answer is applied when the documents settle the question and its confidence is at least ${pct(rs.autoConfidence)}; everything else waits for you.`
+      : "Manual: Jev's percentages are shown; you choose."
+  }
+
+  function renderReview() {
+    if (reviewList.contains(document.activeElement) && document.activeElement.matches("textarea, input")) {
+      reviewPending = true      // never rebuild under someone typing
+      return
+    }
+    reviewPending = false
+    const rs = review.review || {}, j = review.jev || {}
+    const canAuto = j.available && j.key
+    for (const b of document.querySelectorAll(".seg button")) {
+      b.setAttribute("aria-checked", String(b.dataset.mode === rs.mode))
+      b.disabled = b.dataset.mode === "auto" && !canAuto && rs.mode !== "auto"
+      b.title = b.disabled ? "Auto-review needs a TypeSafe API key (Settings)" : ""
+    }
+    $("jev-state").textContent = reviewMsg || jevLine()
+    $("ask-jev").hidden = !canAuto || !review.items.length
+    const keep = reviewList.scrollTop
+    reviewList.textContent = ""
+    if (!review.items.length) {
+      const li = document.createElement("li"); li.className = "empty"
+      li.textContent = "No questions are waiting. When a document needs a decision, it shows up here."
+      reviewList.append(li)
+    }
+    for (const it of review.items) reviewList.append(reviewCard(it))
+    if (review.done.length) {
+      const h = document.createElement("li"); h.className = "group"; h.textContent = `Answered · ${review.done.length}`
+      reviewList.append(h)
+      for (const it of review.done) reviewList.append(doneLine(it))
+    }
+    reviewList.scrollTop = keep
+  }
+  reviewList.addEventListener("focusout", () => setTimeout(() => { if (reviewPending) renderReview() }, 0))
+
+  function reviewCard(it) {
+    const li = document.createElement("li"); li.className = "rv"; li.id = "review-" + it.id
+    const top = document.createElement("div"); top.className = "rv-top"
+    const kind = document.createElement("span"); kind.className = "rv-kind k-" + it.kind; kind.textContent = KIND[it.kind] || it.kind
+    top.append(kind)
+    if (it.file) {
+      const a = document.createElement("a"); a.href = rawUrl(it.file); a.target = "_blank"; a.textContent = base(it.file)
+      a.title = "Open the original: " + it.file; top.append(a)
+    }
+    const id = document.createElement("span"); id.className = "rv-id"; id.textContent = it.id; top.append(id)
+    const q = document.createElement("p"); q.className = "rv-q"; q.textContent = it.question
+    li.append(top, q)
+    if (it.context) {
+      const d = document.createElement("details"); d.className = "rv-ctx"
+      if (it.context.length < 260) d.open = true
+      const sm = document.createElement("summary"); sm.textContent = it.kind === "unreadable" ? "What happened" : "What the sources say"
+      const p = document.createElement("p"); p.textContent = it.context
+      d.append(sm, p); li.append(d)
+    }
+    const jev = it.jev && !it.jev.error ? it.jev : null
+    // Jev's pick is chosen for you only when the documents settle the question.
+    const draft = drafts.get(it.id) || { key: (jev && settled(it) && jev.choice) || it.recommended || "", text: "" }
+    const fs = document.createElement("fieldset"); fs.className = "rv-opts"
+    const legend = document.createElement("legend"); legend.className = "sr"; legend.textContent = it.question; fs.append(legend)
+    const name = "rv-" + it.id
+    for (const o of it.options) {
+      const lab = document.createElement("label"); lab.className = "rv-opt" + (jev && jev.choice === o.key ? " top" : "")
+      const inp = document.createElement("input"); inp.type = "radio"; inp.name = name; inp.value = o.key
+      inp.checked = draft.key === o.key
+      inp.onchange = () => { drafts.set(it.id, { key: o.key, text: (drafts.get(it.id) || {}).text || "" }) }
+      const lbl = document.createElement("span"); lbl.className = "lbl"; lbl.textContent = o.label
+      if (jev && jev.choice === o.key) { const t = document.createElement("em"); t.className = "tag"; t.textContent = "Jev's pick"; lbl.append(t) }
+      if (it.recommended === o.key) { const t = document.createElement("em"); t.className = "tag sugg"; t.textContent = "Suggested"; lbl.append(t) }
+      const bar = document.createElement("span"); bar.className = "bar"
+      const fill = document.createElement("i"); const p = jev && jev.probabilities ? jev.probabilities[o.key] : null
+      fill.style.width = p != null ? pct(p) : "0%"; bar.append(fill)
+      const pc = document.createElement("span"); pc.className = "pct"; pc.textContent = p != null ? pct(p) : "–"
+      pc.title = p != null ? "Jev's probability for this answer" : "Not scored by Jev"
+      lab.append(inp, lbl, bar, pc)
+      if (o.effect) { const ef = document.createElement("span"); ef.className = "eff"; ef.textContent = o.effect; lab.append(ef) }
+      fs.append(lab)
+    }
+    if (!(it.kind === "unreadable" && review.engine === "local")) {
+      const lab = document.createElement("label"); lab.className = "rv-opt other"
+      const inp = document.createElement("input"); inp.type = "radio"; inp.name = name; inp.value = ""
+      inp.checked = draft.key === "" && !!draft.text
+      const wrap = document.createElement("span")
+      const t = document.createElement("span"); t.className = "lbl"
+      t.textContent = it.kind === "unreadable" ? "Something else: say what it is, and it is read again with your note" : "Something else: answer in your own words"
+      const ta = document.createElement("textarea"); ta.rows = 2; ta.maxLength = 1500; ta.value = draft.text
+      ta.placeholder = it.kind === "unreadable" ? "For example: a parking receipt, RM 5.00, paid on 1 March 2026" : "Write the answer"
+      ta.setAttribute("aria-label", t.textContent)
+      ta.oninput = () => { inp.checked = true; drafts.set(it.id, { key: "", text: ta.value }) }
+      inp.onchange = () => { drafts.set(it.id, { key: "", text: ta.value }); ta.focus() }
+      wrap.append(t, ta); lab.append(inp, wrap); fs.append(lab)
+    }
+    li.append(fs)
+    const act = document.createElement("div"); act.className = "rv-actions"
+    const btn = document.createElement("button"); btn.type = "button"; btn.textContent = "Apply this answer"
+    const st = document.createElement("span"); st.className = "muted"
+    st.textContent = cardStatus(it)
+    btn.onclick = async () => {
+      const d = drafts.get(it.id) || draft
+      const text = d.key ? "" : (d.text || "").trim()
+      if (!d.key && !text) { st.className = "bad"; st.textContent = "Choose an answer or write one."; return }
+      btn.disabled = true; st.className = "muted"; st.textContent = "Applying…"
+      const r = await api("POST", "/api/review/answer", { id: it.id, key: d.key, text })
+      btn.disabled = false
+      if (r.ok) { drafts.delete(it.id); reviewMsg = r.message || ""; setTimeout(() => { reviewMsg = ""; renderReview() }, 6000); loadReview(); pollSoon() }
+      else { st.className = "bad"; st.textContent = r.message || "That did not work." }
+    }
+    act.append(btn, st)
+    li.append(act)
+    return li
+  }
+
+  // Whether the documents settle a question (Jev's yes/no check); a set-aside file's
+  // options are the runner's own, so it always counts.
+  const SETTLED = 0.8
+  const settled = (it) => it.kind === "unreadable" || ((it.jev || {}).settled || 0) >= SETTLED
+  function cardStatus(it) {
+    const j = it.jev, rs = review.review || {}, jv = review.jev || {}
+    if (j && j.error) return "Jev could not score this: " + j.error + "."
+    if (j) {
+      const pick = it.options.find((o) => o.key === j.choice)
+      const sure = `Jev's confidence: ${pct(j.confidence)}.`
+      if (!settled(it)) return sure + " The documents alone do not settle this: it needs your own knowledge or decision, so it is yours to answer."
+      if (rs.mode === "auto" && pick && pick.auto === false) return sure + " It suggests leaving this one to you."
+      if (rs.mode === "auto" && j.confidence < rs.autoConfidence) return sure + ` That is below your ${pct(rs.autoConfidence)} bar, so it waits for you.`
+      return sure
+    }
+    if (jv.available && jv.key) return "Waiting for Jev…"
+    return ""
+  }
+
+  function doneLine(it) {
+    const li = document.createElement("li"); li.className = "rv-done"; li.id = "review-" + it.id
+    const ic = document.createElement("span"); ic.className = "ic"; ic.textContent = "✓"; ic.setAttribute("aria-hidden", "true")
+    const a = it.answer || {}
+    const main = document.createElement("span")
+    main.textContent = `${it.question} → ${a.label || a.text || "answered"}`
+    const who = document.createElement("span"); who.className = "who"
+    who.textContent = (a.by === "jev" ? `Answered by auto-review (Jev, confidence ${pct((it.jev || {}).confidence)})` : "Answered by you")
+      + (a.label && a.text ? ` · note: ${a.text}` : "") + (a.at ? " · " + a.at.slice(0, 16).replace("T", " ") : "") + " · " + it.id
+    li.append(ic, main, who)
+    return li
+  }
+
+  let pendingShow = ""
+  function showReview(id) {
+    setTab("files", "review")
+    const el = document.getElementById("review-" + id)
+    if (!el) { pendingShow = id; if (reviewRev === null) loadReviewSoon(); return }
+    pendingShow = ""
+    try { history.replaceState(null, "", "#review-" + id) } catch (_) {}
+    el.scrollIntoView({ block: "start", behavior: reduced ? "auto" : "smooth" })
+    el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash")
+    const first = el.querySelector("input:checked, input")
+    if (first) first.focus({ preventScroll: true })
+  }
+  window.addEventListener("hashchange", () => {
+    const m = /^#review-(.+)$/.exec(location.hash)
+    if (m) showReview(decodeURIComponent(m[1]))
+    else if (location.hash === "#review") setTab("files", "review")
+  })
+
+  for (const b of document.querySelectorAll(".seg button")) b.onclick = async () => {
+    if (b.getAttribute("aria-checked") === "true") return
+    const r = await api("POST", "/api/settings", { review: { mode: b.dataset.mode } })
+    if (r.ok) {
+      review.review = r.settings.review
+      const ready = b.dataset.mode === "auto" ? review.items.filter((it) => it.jev && !it.jev.error && settled(it) && it.jev.confidence >= r.settings.review.autoConfidence).length : 0
+      reviewMsg = ready ? `Auto-review is on: applying ${ready} answer${ready === 1 ? "" : "s"} that clear your bar…` : ""
+      setTimeout(() => { reviewMsg = ""; renderReview() }, 6000)
+      renderReview(); loadReviewSoon()
+    } else { reviewMsg = r.message || "The mode could not be changed."; renderReview() }
+  }
+  $("ask-jev").onclick = async () => {
+    const r = await api("POST", "/api/review/score", {})
+    reviewMsg = r.message || ""; renderReview()
+    setTimeout(() => { reviewMsg = ""; loadReview() }, 4000)
+  }
+
+  // ------------------------------------------------------------------ settings
+  const dlg = $("settings")
+  let current = null
+  const speedText = (n) => `${n} batch${n === 1 ? "" : "es"} at once · ${n <= 1 ? "Slowest" : n <= 2 ? "Slower" : n === 3 ? "Moderate" : n <= 5 ? "Faster" : "Fastest"}`
+  function setMsg(el, text, cls) { el.textContent = text || ""; el.className = cls || "" }
+  function fillSettings(c) {
+    current = c
+    const local = c.engine === "local"
+    $("set-lanes").value = c.parallelBatches
+    $("sec-speed").setAttribute("aria-disabled", String(local))
+    $("speed-help").textContent = local ? "The model on this Mac reads one batch at a time, so this does not apply."
+      : speedText(c.parallelBatches) + ". More at once finishes a big upload sooner and uses your Claude plan's limits faster."
+    for (const r of document.querySelectorAll('input[name="set-mode"]')) r.checked = r.value === c.review.mode
+    $("set-bar").value = Math.round(c.review.autoConfidence * 100)
+    $("bar-readout").textContent = $("set-bar").value + "%"
+    const jevOff = !c.jev.available
+    $("sec-jev").setAttribute("aria-disabled", String(jevOff))
+    $("key-state").textContent = jevOff ? "Off: this wiki reads with the model on this Mac, so nothing is ever sent to Jev."
+      : c.jev.key ? "✓ A key is saved in the Keychain." : "No key yet. Without one, you answer review questions yourself."
+    $("key-remove").hidden = !c.jev.key
+    $("set-key").value = ""
+    for (const r of document.querySelectorAll('input[name="set-mode"]')) r.disabled = r.value === "auto" && (jevOff || !c.jev.key) && c.review.mode !== "auto"
+    $("set-title-in").value = c.title
+    $("set-company").value = c.company
+    $("set-docs").value = c.docsPerBatch
+    $("set-mb").value = c.maxUploadMb
+    $("set-spend").value = c.maxSpendPerBatchUsd
+    $("spend-field").hidden = local
+    $("engine-help").textContent = local
+      ? "Documents are read by the model on this Mac; nothing leaves it. To switch to Claude, run the installer again."
+      : "Documents are read by Claude with your Anthropic account. To read on this Mac only instead, run the installer again."
+  }
+  async function openSettings() {
+    setMsg($("set-msg")); setMsg($("key-msg"))
+    const c = await api("GET", "/api/settings")
+    if (c._status !== 200) return
+    fillSettings(c)
+    if (typeof dlg.showModal === "function") dlg.showModal(); else dlg.setAttribute("open", "")
+  }
+  $("open-settings").onclick = openSettings
+  $("set-close").onclick = $("set-cancel").onclick = () => dlg.close()
+  $("set-lanes").oninput = () => { if (current) $("speed-help").textContent = speedText(Number($("set-lanes").value)) + ". More at once finishes a big upload sooner and uses your Claude plan's limits faster." }
+  $("set-bar").oninput = () => { $("bar-readout").textContent = $("set-bar").value + "%" }
+  $("set-form").onsubmit = async (e) => {
+    e.preventDefault()
+    const mode = (document.querySelector('input[name="set-mode"]:checked') || {}).value || current.review.mode
+    const body = { title: $("set-title-in").value, company: $("set-company").value,
+                   review: { mode, autoConfidence: Number($("set-bar").value) / 100 },
+                   docsPerBatch: Number($("set-docs").value), maxUploadMb: Number($("set-mb").value) }
+    if (current.engine !== "local") { body.parallelBatches = Number($("set-lanes").value); body.maxSpendPerBatchUsd = Number($("set-spend").value) }
+    $("set-save").disabled = true
+    const r = await api("POST", "/api/settings", body)
+    $("set-save").disabled = false
+    if (!r.ok) { setMsg($("set-msg"), r.message || "The settings could not be saved.", "bad"); return }
+    fillSettings(r.settings)
+    review.review = r.settings.review
+    setMsg($("set-msg"), r.changed && r.changed.length ? "Saved. Changes apply from the next batch." : "Nothing changed.", "ok")
+    if (r.changed && r.changed.includes("title")) { document.title = "Upload & Logs · " + r.settings.title; $("wiki-title").textContent = r.settings.title }
+    renderReview(); pollSoon()
+  }
+  $("key-save").onclick = async () => {
+    const key = $("set-key").value.trim()
+    if (!key) { setMsg($("key-msg"), "Paste the key first.", "bad"); return }
+    $("key-save").disabled = true; setMsg($("key-msg"), "Checking the key with TypeSafe…")
+    const r = await api("POST", "/api/settings/jev-key", { key })
+    $("key-save").disabled = false
+    if (!r.ok) { setMsg($("key-msg"), r.message || "The key could not be saved.", "bad"); return }
+    fillSettings(r.settings); setMsg($("key-msg"), r.message, "ok"); loadReviewSoon()
+  }
+  $("key-remove").onclick = async () => {
+    const r = await api("POST", "/api/settings/jev-key", { key: "" })
+    if (r.ok) { fillSettings(r.settings); setMsg($("key-msg"), r.message, "ok"); loadReviewSoon() }
+  }
+
   connect()
   poll()
   render()
+  loadReview()
+  if (/^#review/.test(location.hash)) window.dispatchEvent(new HashChangeEvent("hashchange"))
 })()
 </script>
 </body>

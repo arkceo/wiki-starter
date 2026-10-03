@@ -17,6 +17,13 @@ For each packet:
    If a packet is already reflected in the wiki, make no edits but still move it.
 5. If a file contains git conflict markers (<<<<<<<, =======, >>>>>>>), treat each side
    as a separate packet.
+6. A packet whose Details carry `Review item: RV-...` is the answer to a review question,
+   given by the owner or by the auto-review. Apply that answer to the pages it names, add a
+   line under the matching wiki/_review.md entry saying it was resolved, with the answer
+   and the date, and never raise the same question again. If the answer sets a document
+   aside, move the original into raw/_set-aside/ with a plain shell `mv`, keep its page
+   but mark it `status: superseded` with a line saying the owner set it aside, and take
+   it out of index.md.
 
 In every frontmatter value you write, wrap the value in double quotes if it contains a
 colon followed by a space or a " #".

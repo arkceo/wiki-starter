@@ -19,13 +19,37 @@ Upload page; it sorts them into a queue inside the wiki folder:
 
 | What you upload | Queue | What happens |
 |---|---|---|
-| Documents: PDF, Word, Excel, PowerPoint, images, scans | `raw/_intake/` | Converted to text (with OCR for scans), summarised into the right pages, then filed under `raw/<project>/` |
+| Documents: PDF, Word, Excel, PowerPoint, photos, scans | `raw/_intake/` | Converted to text (with OCR for scans and photos), summarised into the right pages, then filed under `raw/<project>/` |
 | Update Packets (`.md`) from a Claude conversation | `raw/inbox/` | Applied to the affected pages, then moved to `archive/inbox/` |
 
 The same page shows every file going through its real stages (upload, convert, read and
 write, file), a live line saying what the wiki is doing at that moment, and a log of what
 it has done. Files copied straight into those two folders in
-Finder are processed the same way.
+Finder are processed the same way. With Claude, photos and scans are also looked at as
+pictures, so a receipt photographed on a phone is read properly, and a photo with no
+words in it gets a page saying what it shows and when it was taken. People are
+described, never named from their face, and a photo's location is never read.
+
+## Questions for you: the Review tab
+
+When something needs a decision (two documents disagree, a fact is uncertain, or a file
+could not be read after two tries), it becomes a question in the Upload page's
+**Review** tab, with a few answers to choose from. Every **Needs review** label and log
+line links to its question. Answer by choosing one, or write your own; the next run
+applies it to the wiki. A file that could not be read can be sent back to be read again
+(with a note from you saying what it is), set aside in `raw/_set-aside/`, or left in
+`raw/_needs-review/`. Nothing is ever deleted. Each question is also recorded in the
+[[_review|Review queue]].
+
+**Jev**, TypeSafe's decision model, can judge the answers for you. Save a TypeSafe API key
+in **Settings** (top right of the Upload page) and each answer shows how likely Jev
+thinks it is. In **Auto-review**, Jev's answer is applied when the documents settle the
+question and its confidence is at least your bar (70% unless you change it). A question
+that needs your own knowledge or decision always waits for you. Jev is used only when
+Claude reads your documents.
+
+**Settings** also sets the reading speed (how many batches Claude reads at once), the
+wiki's title and your company's name.
 
 ## What runs in the background
 
@@ -50,7 +74,8 @@ Two background agents start when you log in:
      Mac, Claude is never started and nothing leaves the Mac;
   3. tidies frontmatter, refreshes the [[ingestion-register]] and commits the change to
      the folder's local history (git, on this Mac only);
-  4. rebuilds the site and shows a notification.
+  4. rebuilds the site and shows a notification. Open wiki pages show the new version
+     by themselves (a page you are reading offers a button instead of jumping).
 - **The viewer** (`scripts/wiki_server.py`) serves the site at `http://127.0.0.1:8765`
   and the Upload page next to it, on port 8766. It answers only this Mac, never the
   network, and only the Upload page it served can add files.
@@ -69,6 +94,9 @@ run has a spending cap.
 - Documents and the wiki stay on this Mac.
 - With Claude, the text Claude reads while working is sent to Anthropic to be processed.
   With the model on this Mac, nothing leaves the Mac.
+- With a TypeSafe key saved (Claude only), each review question, its answers, and the
+  parts of the wiki and the document it is about are sent to TypeSafe to be scored. The
+  key is kept in the Keychain.
 - Source documents are not in the folder's git history. Back the Mac up with Time Machine.
 
 ## Engine updates

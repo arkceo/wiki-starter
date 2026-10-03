@@ -75,7 +75,18 @@ If anything fails, run the same line again. Finished steps are skipped.
 - **Your rules** → edit `HOUSE-RULES.md` in the wiki folder: who you are, how to file
   things, what never to record. Claude follows it on every run.
 - **Process now** on the Upload page runs the runner immediately.
-- **Review queue** → the *Review queue* page lists anything Claude was unsure about.
+- **Review** → questions that need your decision wait in the Upload page's **Review**
+  tab, each with answers to choose from. Every **Needs review** label links to its
+  question. The *Review queue* page keeps the full record.
+- **Auto-review (optional, Claude only)** → save a TypeSafe API key in **Settings** (top
+  right of the Upload page). Jev, TypeSafe's decision model, then scores each answer, and
+  in Auto-review applies its answer when the documents settle the question and its
+  confidence reaches your bar (70% to start). Questions that need your own knowledge or
+  decision always wait for you. TypeSafe charges per token of
+  the text it is sent: a small fraction of a cent per question.
+- **Settings** → reading speed (batches at once: 1 slowest, 3 moderate, 6 fastest),
+  review mode, the Jev key, title, company name, and batch size, upload limit and
+  spending cap under *Advanced*. They are saved in `wiki.config.json`.
 
 ## Costs
 
@@ -83,8 +94,7 @@ If anything fails, run the same line again. Finished steps are skipped.
   frees the memory when it is done.
 - **Subscription:** processing counts against your plan's usage limits. Claude reads up
   to 3 batches at once, so a large upload uses them up faster, in less time. On a
-  smaller plan, set `parallelBatches` to 1 in `wiki.config.json` to read one batch at
-  a time.
+  smaller plan, set **Reading speed** to 1 in Settings to read one batch at a time.
 - **API key:** you pay per use. A typical document costs cents; a long scanned contract
   can cost more. Documents are read in batches of 8, and each batch is capped (default
   US$5, `maxSpendPerBatchUsd` in `wiki.config.json`), so a large upload costs in
@@ -102,6 +112,10 @@ If anything fails, run the same line again. Finished steps are skipped.
 - With Claude, the text Claude reads while working is sent to Anthropic to be processed.
   With the model on this Mac, nothing leaves the Mac: Claude is never started and no
   Anthropic account is used.
+- Auto-review is off until you save a TypeSafe API key in Settings, and is never used with
+  the model on this Mac. With a key, each review question, its answers, and the parts of
+  the wiki and the document it is about are sent to TypeSafe to be scored; nothing else.
+  The key is kept in the Keychain, not in a file.
 - Source documents are not kept in the wiki's git history. **Turn on Time Machine.**
 
 ## Claude or the model on this Mac?
@@ -157,9 +171,9 @@ works*) follow the engine's instructions only while nobody has edited them.
 |---|---|
 | Nothing seems to happen after uploading a file | It is probably working: a batch of PDFs takes 5–15 minutes. The Upload page's live log shows each step; the full log is `~/Library/Logs/wiki-starter/runner.log`. If no "Wiki is working" notice appeared, allow notifications for *Script Editor* in System Settings → Notifications. |
 | "Wiki needs attention: Claude could not run" | The sign-in expired or was revoked. Run the install line again and choose to replace the sign-in. |
-| A file was moved to `raw/_needs-review/` | It failed twice. Check it opens, then upload it again. The Review queue says why. |
+| A file says **Needs review** | It could not be read twice. Click the label to open its question in the Review tab: read it again (with a note saying what it is), set it aside, or leave it. |
 | Scanned PDF summarised badly | OCR quality depends on the scan. The original is always kept and linked from the page. |
-| Open Wiki shows "being built" | The first build takes a minute or two. Refresh. |
+| Open Wiki shows "being built" | The first build takes a minute or two. The page opens the wiki by itself when it is ready. |
 | The Upload page says "Forbidden" | The viewer restarted (an engine update does that). Reload the page. |
 | The wiki stopped updating after a restart | Log in: background agents only run while a user is signed in. Consider automatic login on a dedicated Mac mini. |
 | Anything else | `~/Library/Logs/wiki-starter/runner.log` and `install.log` |

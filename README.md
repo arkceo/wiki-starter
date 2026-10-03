@@ -64,7 +64,7 @@ If macOS shows **Background Items Added**, leave it allowed.
 - **Watch progress:** the Upload page shows each file moving through its real stages
   (upload, convert, read and write, file), an "n of m done" count, a live line saying what
   the wiki is doing at that moment, and a log of what it has done. You get a notification
-  when the wiki has been updated.
+  when the wiki has been updated, and open wiki pages show the new version by themselves.
 - **Large uploads** are read in batches: 8 documents each with Claude, up to 3 batches at
   the same time, and 20 at a time with the model on this Mac. Documents are converted to
   text ahead of the reading, and the site is refreshed every few minutes, so the first
@@ -72,10 +72,29 @@ If macOS shows **Background Items Added**, leave it allowed.
 - **Process immediately:** press **Process now** on the Upload page.
 - **Ask questions** (Claude only): open the wiki folder in the Claude desktop app, or run
   `claude` in Terminal inside that folder.
-- **Review queue:** the *Review queue* page lists anything the wiki was unsure about. With
-  the model on this Mac, a figure a later document changes (payment terms, a price, a fee,
-  a notice period, an address) is caught by code and listed with both values and their
-  documents.
+- **Review:** anything that needs your decision (two documents disagree, a fact is
+  unclear, a file could not be read) waits in the Upload page's **Review** tab, with a
+  count on the tab. Every **Needs review** label links to its question. Choose an answer
+  or write your own; the wiki applies it on its next run. A file that could not be read
+  can be read again with your note saying what it is, or set aside. Nothing is deleted.
+  The *Review queue* page keeps the full record. With the model on this Mac, a figure a
+  later document changes (payment terms, a price, a fee, a notice period, an address) is
+  caught by code and listed with both values and their documents.
+- **Auto-review with Jev** (Claude only, optional): save a TypeSafe API key in
+  **Settings** and Jev, TypeSafe's decision model, scores every answer. Switch the Review
+  tab to **Auto-review** and Jev's answer is applied when the documents themselves settle
+  the question (Jev checks this first) and its confidence is at least 70% (you can change
+  this). A question that needs your own knowledge or decision always waits for you.
+- **Settings** (top right of the Upload page): how many batches Claude reads at once
+  (1 slowest, 3 moderate, 6 fastest), the review mode, the Jev key, the title, your
+  company's name, and batch size, upload limit and spending cap under *Advanced*.
+- **Photos and scans:** photos (including iPhone HEIC) are read with OCR, and with Claude
+  also looked at as pictures, so a receipt photographed on a phone is read properly. A
+  photo with no words in it (a delivery, a site, a product) gets a page saying what it
+  shows and when it was taken, so it can be searched and judged like any document.
+  People in a photo are described, never named from their face, and a photo's location
+  is never read. A photo that may not be a business record raises a review question.
+  With the model on this Mac, a photo with no words cannot be described yet.
 - **Pages you edit:** with the model on this Mac, the top of a page (Overview, Current
   facts, Related, Documents) is kept up to date by the wiki. Edit it and the wiki leaves
   it as you wrote it; everything below it is never changed.
@@ -107,7 +126,7 @@ skill, say "wrap up" at the end of a conversation, and upload the file it gives 
 | "Claude could not run" | Paste the install line again and replace the sign-in. |
 | "The local model could not run" | Paste the install line again. It checks and repairs the model. |
 | "The model on this Mac stopped responding" | Nothing to do: the rest is read on the next run. A file it stops on twice is set aside in `raw/_needs-review/`. |
-| A file was moved to `raw/_needs-review/` | It failed twice. Check that it opens, then upload it again. |
+| A file says **Needs review** | It could not be read twice. Click the label: its question in the Review tab offers to read it again (add a note saying what it is), set it aside, or leave it. |
 | No notifications appear | Open System Settings → Notifications → **Script Editor** and allow notifications. |
 | macOS asks to let "Python" find devices on local networks | Choose **Don't Allow**. The wiki only talks to this Mac and works either way. If you allowed it earlier, switch it off in System Settings → Privacy & Security → Local Network. |
 
@@ -121,6 +140,9 @@ options compare are in `INSTALL.md`.
   never looks for or connects to other devices on it.
 - Sent to Anthropic: the text Claude reads while it works, nothing else. With the model on
   this Mac, nothing at all.
+- Sent to TypeSafe, only if you save a TypeSafe key (Claude only): each review question,
+  its answers, and the parts of the wiki and the document it is about. The key is kept in
+  the Keychain.
 - Version history: a local git history in the wiki folder, never pushed anywhere.
 
 ## Uninstall

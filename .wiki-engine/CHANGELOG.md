@@ -2,6 +2,45 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Photos with no words get a description
+- With Claude, a photo is a document even when there are no words in it: a delivery, a
+  site visit, a product, a whiteboard drawing. It gets a page saying what the photo
+  shows and when it was taken, linked to what it concerns, instead of ending up in
+  Needs review.
+- The description is text, so Jev can judge a question about the photo too.
+- People are described, never named from their face: a name comes only from text in
+  the photo, another document or your note. A photo's location is never read.
+- A photo that may not be a business record raises a review question; "set it aside"
+  moves it to `raw/_set-aside/`.
+- When Claude reads several batches at once, two sessions can no longer replace each
+  other's new pages: a page that already exists can only be added to.
+- Your company's name from Settings now reaches Claude, so it can tell your business from
+  the other companies in a document.
+
+## A Review tab, Settings, and photos that are read
+- **Review tab**, next to Files on the Upload page, with a count of open questions.
+  Anything that needs your decision becomes a question with answers to choose from: two
+  documents that disagree, an unclear fact, or a file that could not be read after two
+  tries. Every **Needs review** label and log line links to its question. Choose an
+  answer or write your own; the next run applies it to the wiki. A file that could not be
+  read can be read again with your note saying what it is, or set aside in
+  `raw/_set-aside/`. Nothing is deleted.
+- **Auto-review with Jev** (optional, Claude only): save a TypeSafe API key in Settings
+  and Jev, TypeSafe's decision model, shows how likely each answer is. In Auto-review,
+  Jev's answer is applied only when the documents themselves settle the question (Jev
+  checks this first) and its confidence reaches your bar (70% to start). A question that
+  needs your own knowledge or decision always waits for you: in testing, Jev was
+  confident about such questions too, and sometimes wrong. Questions about one document are sent together, and
+  documents at the same time. Without a key, nothing is sent to TypeSafe.
+- **Settings** button, top right of the Upload page: reading speed (1 slowest, 3
+  moderate, 6 fastest batches at once), review mode and bar, the Jev key (kept in the
+  Keychain), title, company name, and batch size, upload limit and spending cap.
+- **Photos are read.** Before, a photo became an empty text file and was set aside after
+  two tries. Photos are now read with OCR, turned upright first, and iPhone HEIC photos
+  are converted. With Claude, photos and poor scans are also looked at as pictures.
+- **Pages update by themselves.** An open wiki page reloads when a new version is
+  built; a page you are reading shows a button instead, so you never lose your place.
+
 ## Claude reads three batches at once
 - Claude now reads up to 3 batches of documents at the same time. The first batch runs
   alone, then the rest go three at a time. Set `parallelBatches` in `wiki.config.json`

@@ -9,7 +9,7 @@ progress and a live log. Standard library only.
       Append one event. key=value stores text; key:=value stores parsed JSON (a number,
       a list).
 
-  wiki_events.py claude-stream --file F --pid P [--label L]
+  wiki_events.py claude-stream --file F --pid P [--label L] [--batch B]
       Follow Claude's `--output-format stream-json` output in F until process P has
       exited, and turn each completed action into an event:
         Read of a document's Markdown mirror  -> read     (the document being read)
@@ -168,21 +168,41 @@ def rel(path):
 
 
 def mirror_to_source(path):
-    """cache/md/_intake/a/b.pdf.md -> raw/_intake/a/b.pdf (the converter's naming)."""
+    """cache/md/_intake/a/b.pdf.md -> raw/_intake/a/b.pdf (the converter's naming), and
+    cache/md/_intake/a/IMG_1.HEIC.jpg -> raw/_intake/a/IMG_1.HEIC (a photo's JPEG copy)."""
     if path.startswith("cache/md/") and path.endswith(".md"):
         return "raw/" + path[len("cache/md/") : -len(".md")]
+    if path.startswith("cache/md/") and path.lower().endswith((".heic.jpg", ".heif.jpg")):
+        return "raw/" + path[len("cache/md/") : -len(".jpg")]
     return ""
+
+
+def review_item(content):
+    """(id, question) from a review item Claude wrote, or None."""
+    try:
+        item = json.loads(content or "")
+    except ValueError:
+        return None
+    if not isinstance(item, dict):
+        return None
+    return str(item.get("id") or ""), " ".join(str(item.get("question") or "").split())[:200]
 
 
 # ------------------------------------------------------------- claude stream -------
 class ClaudeStream:
     """Turns Claude Code stream-json messages into events. Tolerates unknown shapes."""
 
-    def __init__(self, label):
+    def __init__(self, label, batch=None):
         self.label = label
         self.pending = {}  # tool_use id -> (name, input)
         self.current = ""  # the document or packet being worked on
         self.done = False
+        # The documents this session was given. Another document it reads (one in
+        # another batch, for context) is looking something up, not working on it.
+        self.batch = batch
+
+    def mine(self, src):
+        return self.batch is None or src in self.batch
 
     def handle(self, msg):
         if not isinstance(msg, dict):
@@ -221,8 +241,12 @@ class ClaudeStream:
         if name == "Read":
             path = rel(inp.get("file_path", ""))
             src = mirror_to_source(path)
-            if src.startswith("raw/_intake/"):
-                set_now("read", file=src, detail="Claude is reading it")
+            if src.startswith("raw/_intake/") and self.mine(src):
+                photo = path.lower().endswith(".jpg")
+                set_now("read", file=src, detail="Claude is looking at the photo" if photo
+                        else "Claude is reading it")
+            elif path.startswith("raw/_intake/") and self.mine(path):
+                set_now("read", file=path, detail="Claude is looking at the original")
             elif path.startswith("raw/inbox/"):
                 set_now("read", file=path, detail="Claude is reading the update")
             else:
@@ -232,7 +256,8 @@ class ClaudeStream:
             set_now("search", file=self.current, detail=f"searching the wiki for {what}".strip())
         elif name in ("Write", "Edit", "MultiEdit"):
             path = rel(inp.get("file_path", ""))
-            target = "the review queue" if path == "wiki/_review.md" else path.replace("wiki/", "", 1)
+            target = ("the review queue" if path == "wiki/_review.md" or path.startswith("review/")
+                      else path.replace("wiki/", "", 1))
             set_now("write", file=self.current, detail=f"writing {target}")
         elif name == "Bash":
             try:
@@ -253,13 +278,20 @@ class ClaudeStream:
         if name == "Read":
             path = rel(inp.get("file_path", ""))
             src = mirror_to_source(path)
-            if src.startswith("raw/_intake/"):
+            if src.startswith("raw/_intake/") and self.mine(src):
                 self.set_current(src)
+            elif path.startswith("raw/_intake/") and self.mine(path):
+                self.set_current(path)
             elif path.startswith("raw/inbox/") and path.endswith((".md", ".markdown")):
                 self.set_current(path)
         elif name in ("Write", "Edit", "MultiEdit"):
             path = rel(inp.get("file_path", ""))
-            if path.startswith("wiki/") or path in ("index.md", "log.md"):
+            if path.startswith("review/open/") and path.endswith(".json") and name == "Write":
+                found = review_item(inp.get("content"))
+                if found:
+                    emit("review-item", file=self.current, id=found[0], question=found[1])
+                    log(f"  question for review: {found[1]} ({found[0]})")
+            elif path.startswith("wiki/") or path in ("index.md", "log.md"):
                 if path == "wiki/_review.md":
                     emit("review", file=self.current, page=path)
                     log(f"  noted for review ({self.current or 'general'})")
@@ -309,11 +341,19 @@ def pid_alive(pid):
         return True
 
 
-def follow(path, pid, label, poll=0.5, current_path=""):
+def follow(path, pid, label, poll=0.5, current_path="", batch_path=""):
     """Turn one Claude session's stream into events and live-line records. With
     current_path, also keep the file this session is working on there: several sessions
-    can run at once, so the shared live line cannot say which file a stalled one was on."""
-    stream = ClaudeStream(label)
+    can run at once, so the shared live line cannot say which file a stalled one was on.
+    With batch_path, only the documents listed there count as this session's."""
+    batch = None
+    if batch_path:
+        try:
+            with open(batch_path, encoding="utf-8") as f:
+                batch = {ln.strip() for ln in f if ln.strip()}
+        except OSError:
+            batch = None
+    stream = ClaudeStream(label, batch)
     buf, offset, last = "", 0, None
     while True:
         alive = pid_alive(pid)
@@ -402,6 +442,7 @@ def main(argv=None):
     c.add_argument("--pid", type=int, required=True)
     c.add_argument("--label", default="")
     c.add_argument("--current", default="")
+    c.add_argument("--batch", default="")
     cs = sub.add_parser("convert-stream")
     cs.add_argument("--total", type=int, default=0)
     cs.add_argument("--start", type=int, default=0)
@@ -426,7 +467,7 @@ def main(argv=None):
                 fields[k] = v
         (emit if a.cmd == "emit" else set_now)(a.type, **fields)
     elif a.cmd == "claude-stream":
-        follow(a.file, a.pid, a.label, current_path=a.current)
+        follow(a.file, a.pid, a.label, current_path=a.current, batch_path=a.batch)
     else:
         convert_stream(total=a.total, start=a.start, quiet=a.quiet)
 
