@@ -5,25 +5,30 @@
 #
 # What it does (each step checks first, so running it again is safe and resumes):
 #   1. checks this is a Mac you can administer;
-#   2. installs Homebrew (asks for your Mac password once), then git, Node, Python and
-#      the OCR tools (ocrmypdf, Tesseract, Ghostscript);
-#   3. asks who should read your documents: Claude (needs an Anthropic sign-in, stored in
-#      the macOS Keychain) or a model that runs on this Mac (nothing leaves it, no
+#   2. asks for the wiki's name, and who should read your documents: Claude (needs an
+#      Anthropic sign-in) or a model that runs on this Mac (nothing leaves it, no
 #      account; a one-off download of a few GB);
+#   3. installs Homebrew (asks for your Mac password once), then git, Node, Python and
+#      the OCR tools (ocrmypdf, Tesseract, Ghostscript);
 #   4. downloads the wiki engine into ~/Wiki/<name> and sets up its local history (git,
 #      on this Mac only);
-#   5. starts two background agents: the runner (processes what you upload) and the
+#   5. with Claude, the Anthropic sign-in (stored in the macOS Keychain); with the model
+#      on this Mac, its download and a first start;
+#   6. with Claude, Jev, the review judge: an optional TypeSafe API key (Keychain too),
+#      which turns Auto-review on;
+#   7. starts two background agents, the runner (processes what you upload) and the
 #      viewer (the wiki site and its Upload page at http://127.0.0.1:8765, visible only
-#      to this Mac);
-#   6. puts Open Wiki on your Desktop;
-#   7. processes a welcome note as a test and opens the wiki.
+#      to this Mac), and puts Open Wiki on your Desktop;
+#   8. processes a welcome note as a test and opens the wiki.
 #
-# Nothing is published. The only account involved is Anthropic's, and none at all with the
-# local model. Logs (no secrets): ~/Library/Logs/wiki-starter/install.log
+# Nothing is published. The only accounts involved are Anthropic's and, if you give a key,
+# TypeSafe's; none at all with the local model. Logs (no secrets):
+# ~/Library/Logs/wiki-starter/install.log
 #
 # Answers can be given as environment variables instead of prompts:
 #   WIKI_TITLE, WIKI_COMPANY, WIKI_ENGINE (claude|local), WIKI_AUTH
-#   (subscription|apikey|skip), WIKI_API_KEY, WIKI_OAUTH_TOKEN, WIKI_SKIP_SMOKE_TEST=1
+#   (subscription|apikey|skip), WIKI_API_KEY, WIKI_OAUTH_TOKEN, WIKI_TYPESAFE_KEY (Jev's
+#   key), WIKI_JEV=skip (no Jev key now), WIKI_SKIP_SMOKE_TEST=1
 
 set -u
 
@@ -122,7 +127,7 @@ trap stop_sudo_keepalive EXIT
 
 # --------------------------------------------------------------- 1 preflight ---
 preflight() {
-  step "1/7  Checking this Mac"
+  step "1/8  Checking this Mac"
   if [ "$(uname -s)" != "Darwin" ] && [ -z "${WIKI_ALLOW_NON_MAC:-}" ]; then
     die "This installer is for macOS."
   fi
@@ -144,7 +149,7 @@ preflight() {
 WIKI_DIR=""
 SLUG=""
 questions() {
-  step "2/7  Your wiki"
+  step "2/8  Your wiki"
   local existing
   existing=$(ls -d "$WIKI_ROOT"/*/.wiki-engine 2>/dev/null | head -1)
   if [ -n "$existing" ] && [ -z "${WIKI_TITLE:-}" ]; then
@@ -194,7 +199,7 @@ choose_engine() {
 
 # ------------------------------------------------------------------ 3 tools ----
 install_tools() {
-  step "3/7  Installing tools (a few minutes the first time)"
+  step "3/8  Installing tools (a few minutes the first time)"
   local brew
   brew=$(brew_bin)
   if [ -z "$brew" ]; then
@@ -251,7 +256,7 @@ python_bin() {
 }
 
 install_engine() {
-  step "4/7  Setting up the wiki"
+  step "4/8  Setting up the wiki"
   if [ -f "$WIKI_DIR/.wiki-engine/VERSION" ]; then
     ok "engine already in place ($(cat "$WIKI_DIR/.wiki-engine/VERSION")); use Update Wiki Engine to update it"
   else
@@ -289,7 +294,8 @@ except Exception:
 cfg["title"] = os.environ["WIKI_TITLE_V"]
 cfg["company"] = os.environ["WIKI_COMPANY_V"]
 cfg["port"] = int(os.environ["WIKI_PORT_V"])
-cfg.setdefault("maxSpendPerBatchUsd", 5)
+# Performance mode and reading speed come from the shipped wiki.config.json (Maximum,
+# fastest); scripts/wiki_settings.py holds the figures.
 json.dump(cfg, open("wiki.config.json", "w"), indent=2)
 open("wiki.config.json", "a").write("\n")
 company = os.environ["WIKI_COMPANY_V"]
@@ -354,7 +360,7 @@ PYEOF
 sha256_of() { shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1; }
 
 local_model_setup() {
-  step "5/7  The model on this Mac"
+  step "5/8  The model on this Mac"
   local path="$MODEL_DIR/$LOCAL_MODEL_FILE"
   mkdir -p "$MODEL_DIR"
   if [ -f "$path" ] && [ "$(sha256_of "$path")" = "$LOCAL_MODEL_SHA256" ]; then
@@ -391,7 +397,9 @@ PYEOF
 
 # ------------------------------------------------------------ 5 anthropic ------
 keychain_has() { security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$1" >/dev/null 2>&1; }
-keychain_put() { security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a "$1" -l "Wiki ($1)" -w "$2" >/dev/null 2>&1; }
+keychain_put() { # account secret [label]
+  security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a "$1" -l "${3:-Wiki ($1)}" -w "$2" >/dev/null 2>&1
+}
 keychain_del() { security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "$1" >/dev/null 2>&1; }
 
 check_api_key() { # key -> http status of a free models listing
@@ -407,7 +415,7 @@ check_oauth_token() { # token -> 0 if claude answers with it
 }
 
 anthropic_signin() {
-  step "5/7  Anthropic sign-in"
+  step "5/8  Anthropic sign-in"
   if keychain_has claude-oauth-token || keychain_has anthropic-api-key; then
     local replace="${WIKI_REPLACE_AUTH:-}"
     [ -n "${WIKI_AUTH:-}" ] && replace="y"
@@ -473,7 +481,133 @@ anthropic_signin() {
   esac
 }
 
-# --------------------------------------------------------------- 6 agents ------
+# ------------------------------------------------------------------ 6 jev ------
+# Jev, TypeSafe's decision model, scores the answers to the review questions
+# (scripts/wiki_jev.py). It is optional: without a key the wiki works the same and the
+# owner answers every question, so nothing in this step stops the installer. Settings on
+# the Upload page checks and stores a key the same way, later.
+JEV_ACCOUNT="typesafe-api-key"
+JEV_LABEL="Wiki (TypeSafe Jev API key)"   # the label wiki_jev.set_key gives it
+JEV_LATER="add a TypeSafe key later in Settings on the Upload page"
+
+looks_like_key() { # key -> 0 for 1 to 512 printable ASCII characters, as Settings checks
+  [ -n "$1" ] && [ "${#1}" -le 512 ] && ! printf '%s' "$1" | LC_ALL=C grep -q '[^[:print:]]'
+}
+
+# Jev's own check of a key. The key goes in on stdin, never as an argument (ps would show
+# it) or in the environment. Prints TypeSafe's one-line answer; returns 0 when Jev
+# answered, 1 when TypeSafe refused the key, 2 when it could not be checked now.
+check_jev_key() { # key -> message
+  local out rc
+  out=$(printf '%s' "$1" | .venv/bin/python scripts/wiki_jev.py test-key 2>/dev/null)
+  rc=$?
+  log "TypeSafe key check: exit $rc"
+  out=$(printf '%s\n' "$out" | tail -n 1)
+  case "$rc" in 0|1) ;; *) rc=2 ;; esac
+  if [ -z "$out" ]; then out="the check gave no answer"; rc=2; fi
+  printf '%s' "$out"
+  return "$rc"
+}
+
+# Auto-review on, unless the owner chose the review mode while a key was stored (a run
+# again keeps it). Without a key, Auto-review could not be chosen, so a "manual" saved by
+# Settings then (it saves the mode with every change) is not a choice. Prints "set" or
+# "kept". $1: 1 if a key was stored before this step.
+jev_auto_review() {
+  JEV_HAD_KEY="$1" .venv/bin/python - 2>> "$LOG_FILE" <<'PYEOF'
+import json, os
+cfg = json.load(open("wiki.config.json"))
+review = cfg.get("review") if isinstance(cfg.get("review"), dict) else None
+if review is not None and (os.environ.get("JEV_HAD_KEY") == "1" or review.get("mode") == "auto"):
+    print("kept")
+else:
+    cfg["review"] = dict(review or {}, mode="auto", autoConfidence=0.7)
+    json.dump(cfg, open("wiki.config.json", "w"), indent=2)
+    open("wiki.config.json", "a").write("\n")
+    print("set")
+PYEOF
+}
+
+review_mode() { # auto|manual, read the way the engine reads it
+  .venv/bin/python -c 'import sys; sys.path.insert(0, "scripts"); import wiki_jev
+print(wiki_jev.review_settings()["mode"])' 2>/dev/null
+}
+
+jev_not_stored() { # ok|warn: how the step ends when no new key was stored
+  if keychain_has "$JEV_ACCOUNT"; then "$1" "kept the stored TypeSafe key"
+  else "$1" "skipped: Jev stays off; $JEV_LATER"; fi
+}
+
+jev_setup() {
+  step "6/8  Jev, the review judge (TypeSafe)"
+  if [ "$ENGINE_CHOICE" = local ]; then
+    ok "Jev is off: with the model on this Mac, nothing leaves it"
+    return 0
+  fi
+  local had_key=0
+  if keychain_has "$JEV_ACCOUNT"; then
+    had_key=1
+    local replace=""
+    [ -n "${WIKI_TYPESAFE_KEY:-}" ] && replace="y"
+    [ "${WIKI_JEV:-}" = skip ] && replace="n"
+    ask replace "A TypeSafe key is already stored. Replace it? (y/N)" "n"
+    case "$replace" in y|Y|yes|YES) ;; *) ok "using the stored TypeSafe key"; return 0 ;; esac
+  elif [ "${WIKI_JEV:-}" = skip ]; then
+    ok "skipped: $JEV_LATER"
+    return 0
+  fi
+  info "Jev, TypeSafe's decision model, scores the answers to each review question. With"
+  info "Auto-review on, it answers the questions the documents themselves settle. Only a"
+  info "question, its options and the excerpts it is about go to TypeSafe, only with a key."
+  local key tries=0 msg rc
+  key=$(printf '%s' "${WIKI_TYPESAFE_KEY:-}" | tr -d '[:space:]')
+  if [ -z "$key" ]; then
+    info "Get a key at https://console.typesafe.ai, or press Enter to skip: you can"
+    info "add one later in Settings on the Upload page."
+    have_tty && open "https://console.typesafe.ai" 2>/dev/null
+    ask_secret key "Paste the TypeSafe key (it stays hidden; Enter skips)"
+  fi
+  while :; do
+    if [ -z "$key" ]; then jev_not_stored ok; return 0; fi
+    tries=$((tries + 1))
+    if looks_like_key "$key"; then
+      msg=$(check_jev_key "$key"); rc=$?
+    else
+      msg="that does not look like an API key"; rc=1
+    fi
+    if [ "$rc" = 0 ]; then ok "$msg"; break; fi
+    if [ "$rc" = 2 ]; then warn "the key could not be checked just now ($msg); storing it anyway"; break; fi
+    warn "$msg"
+    if [ "$tries" -ge 3 ] || [ -n "${WIKI_TYPESAFE_KEY:-}" ] || ! have_tty; then
+      jev_not_stored warn
+      return 0
+    fi
+    key=""
+    ask_secret key "Paste the key again (it stays hidden; Enter skips)"
+  done
+  if ! keychain_put "$JEV_ACCOUNT" "$key" "$JEV_LABEL"; then
+    warn "the key could not be saved in the Keychain; $JEV_LATER"
+    return 0
+  fi
+  ok "TypeSafe key stored in the Keychain"
+  case "$(jev_auto_review "$had_key")" in
+    set)  ok "Auto-review is on: Jev answers the questions the documents settle" ;;
+    kept) ok "review mode left as you set it ($(review_mode))" ;;
+    *)    warn "Auto-review could not be turned on; turn it on in the Upload page's Review tab" ;;
+  esac
+}
+
+jev_summary() { # the Done. line about Jev (Claude only)
+  if ! keychain_has "$JEV_ACCOUNT"; then
+    info "Review:        Jev is off; $JEV_LATER"
+  elif [ "$(review_mode)" = auto ]; then
+    info "Review:        Auto-review is on: Jev answers what the documents settle"
+  else
+    info "Review:        Jev scores the answers; Auto-review is off (Review tab)"
+  fi
+}
+
+# --------------------------------------------------------------- 7 agents ------
 write_plist() { # path label program-args-xml extra-xml
   cat > "$1" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -506,7 +640,7 @@ load_agent() { # plist label
 }
 
 install_agents() {
-  step "6/7  Starting the background agents"
+  step "7/8  Starting the background agents"
   mkdir -p "$AGENT_DIR"
   local runner="local.wiki-starter.$SLUG.runner" viewer="local.wiki-starter.$SLUG.viewer"
   local d; d=$(xml_escape "$WIKI_DIR")
@@ -521,7 +655,7 @@ install_agents() {
   </array>
   <key>StartInterval</key><integer>900</integer>
   <key>ThrottleInterval</key><integer>30</integer>
-  <key>ProcessType</key><string>Background</string>"
+  <key>ProcessType</key><string>Standard</string>"
   load_agent "$AGENT_DIR/$runner.plist" "$runner"
   ok "runner: processes everything you upload"
 
@@ -560,9 +694,9 @@ remove_old_drop_links() { # desktop-dir
   done
 }
 
-# ------------------------------------------------------------ 7 first run ------
+# ------------------------------------------------------------ 8 first run ------
 first_run() {
-  step "7/7  First test"
+  step "8/8  First test"
   if [ -n "${WIKI_SKIP_SMOKE_TEST:-}" ] || [ -n "$(ls archive/inbox/*.md 2>/dev/null)" ]; then
     ok "test skipped"
   elif [ "$ENGINE_CHOICE" != local ] && ! keychain_has claude-oauth-token && ! keychain_has anthropic-api-key; then
@@ -594,7 +728,8 @@ first_run() {
 # same pipe every command it starts inherits as stdin; a command that reads stdin
 # (Homebrew does while installing) would otherwise swallow the rest of the script and
 # the installer would stop silently after step 3. Prompts read /dev/tty directly, so
-# stdin is pointed at /dev/null for good measure.
+# stdin is pointed at /dev/null for good measure. A test sets WIKI_INSTALL_NO_MAIN to
+# source this file and run one step on its own.
 main() {
   exec < /dev/null
   printf '\n'
@@ -609,6 +744,7 @@ main() {
   install_tools
   install_engine
   if [ "$ENGINE_CHOICE" = local ]; then local_model_setup; else anthropic_signin; fi
+  jev_setup
   set_engine "$ENGINE_CHOICE"
   install_agents
   first_run
@@ -624,9 +760,10 @@ main() {
     info "Reading:       a model on this Mac; nothing leaves it"
   else
     info "Ask questions: open the wiki folder in Claude (desktop app or 'claude' in Terminal)"
+    jev_summary
   fi
   info "Turn on Time Machine: your documents are not kept anywhere else."
   printf '\n'
 }
 
-main "$@"
+[ -n "${WIKI_INSTALL_NO_MAIN:-}" ] || main "$@"

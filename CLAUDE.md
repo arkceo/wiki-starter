@@ -51,6 +51,9 @@ archive/inbox/           # processed packets
 review/
   open/                  # questions the owner can answer with one click (Upload page, Review tab)
   done/                  # answered questions, with the answer and who gave it
+actions/
+  open/                  # suggested actions: work someone must do outside the wiki (Upload page)
+  done/                  # actions done or dismissed
 index.md                 # catalog of every wiki page
 log.md                   # append-only chronological record
 ```
@@ -129,7 +132,11 @@ facts:
    is a no-op, but still moved.
 4. A file with git conflict markers is treated as one packet per side.
 5. A packet carrying `Review item: RV-...` is an answer to a review question: apply it,
-   and note under the matching `wiki/_review.md` entry that it was resolved.
+   and note under the matching `wiki/_review.md` entry that it was resolved. If the
+   answer means someone must do something outside the wiki (correct a return, chase a
+   payment, renew a licence), also write one suggested action in `actions/open/`, with
+   briefs for an AI agent, an employee and an outside agent (the format is in
+   `engine/prompts/ingest.md`). Never invent a fact or a deadline in it.
 
 ## Contradictions and uncertainty
 

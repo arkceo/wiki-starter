@@ -16,13 +16,22 @@ Run by a LaunchAgent with KeepAlive. Two origins, on two ports of 127.0.0.1:
     /api/upload        POST one file into the queue (raw/_intake/, or raw/inbox/ for a packet)
     /api/events        the activity log as a live stream (server-sent events), and what
                        is happening right now as `now` events
-    /api/status        what is queued, running and waiting for review, and how long and
-                       how much the documents still waiting should take (wiki_estimate.py)
+    /api/status        what is queued, running (and for how long nothing has moved) and
+                       waiting for review or action, and how long and how much the
+                       documents still waiting should take (wiki_estimate.py)
     /api/process       POST: start the runner now
-    /api/review        the review questions (scripts/wiki_review.py); POST
-                       /api/review/answer settles one, /api/review/score asks Jev again
+    /api/restart       POST: stop a run that is stuck, with everything it started, and
+                       start a fresh one
+    /api/review        the review questions (scripts/wiki_review.py), each with where its
+                       document is now and the page citing it; POST /api/review/answer
+                       settles one, /api/review/reopen opens an answered one again to change
+                       the answer, /api/review/score asks Jev again
+    /api/actions       the suggested actions (scripts/wiki_actions.py); POST
+                       /api/actions/update assigns one, or marks it done, dismissed or open
     /api/settings      GET, or POST to change, the settings in wiki.config.json the owner may
-                       change here; POST /api/settings/jev-key saves the TypeSafe key in the
+                       change here: the performance mode and the figures it sets
+                       (scripts/wiki_settings.py), reading speed, title, company, reading
+                       and review; POST /api/settings/jev-key saves the TypeSafe key in the
                        Keychain (or removes it)
 
 Both bind to 127.0.0.1, so nothing on the network can reach them. The rest stops a web
@@ -44,6 +53,7 @@ library only.
 Usage: wiki_server.py [--port N] [--upload-port N]   (default: wiki.config.json)
 """
 import argparse
+import copy
 import filecmp
 import hmac
 import threading
@@ -54,6 +64,8 @@ import os
 import posixpath
 import re
 import secrets
+import shutil
+import signal
 import socketserver
 import subprocess
 import sys
@@ -62,11 +74,13 @@ import urllib.parse
 
 WIKI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(WIKI_DIR, "scripts"))
+import wiki_actions  # noqa: E402
 import wiki_estimate  # noqa: E402
 import wiki_events  # noqa: E402
 import wiki_jev  # noqa: E402
 import wiki_netguard  # noqa: E402
 import wiki_review  # noqa: E402
+import wiki_settings  # noqa: E402
 
 BIND = "127.0.0.1"
 ROOTS = {"raw": "raw", "archive": "archive"}  # url prefix -> folder under WIKI_DIR
@@ -117,11 +131,7 @@ HEARTBEAT_SECONDS = 15
 
 
 def load_config():
-    try:
-        with open(os.path.join(WIKI_DIR, "wiki.config.json"), encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    return wiki_settings.load(os.path.join(WIKI_DIR, "wiki.config.json"))
 
 
 def default_port():
@@ -139,10 +149,8 @@ def default_upload_port(port):
 
 
 def max_upload_bytes():
-    try:
-        return int(float(load_config().get("maxUploadMb") or 500) * 1024 * 1024)
-    except (TypeError, ValueError):
-        return 500 * 1024 * 1024
+    """The largest single upload: set by the performance mode, or by hand."""
+    return int(wiki_settings.effective(load_config())["maxUploadMb"] * 1024 * 1024)
 
 
 def safe_join(base, rel):
@@ -240,18 +248,164 @@ def list_queue(folder):
     return sorted(out)
 
 
-def runner_state():
+def lock_pid():
+    """The pid in the runner's lock, or None."""
     try:
         pid = int(open(os.path.join(LOCK_DIR, "pid")).read().strip())
-        os.kill(pid, 0)
     except (OSError, ValueError):
+        return None
+    return pid if pid > 1 else None
+
+
+def is_runner(pid):
+    """Whether pid is a runner that is still running. A lock left by a runner that was
+    killed holds a pid some other program may have by now (pids are reused): that one
+    must not show "Working" forever, so the process's command line must name the runner."""
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        pass   # alive, but not ours to signal: ps says what it is
+    except OSError:
+        return False
+    try:
+        r = subprocess.run(["ps", "-p", str(pid), "-o", "command="], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return True   # without ps, alive is all that can be told
+    return "wiki_runner.sh" in r.stdout
+
+
+# Touched by the run whenever it makes real progress (an event, or a new step on the live
+# line); the live line itself is rewritten every half minute while documents are being
+# read, so its own time says the run is alive, not that it is getting anywhere.
+PROGRESS = os.path.join(STATE_DIR, "progress")
+# Conversion running ahead of the reading keeps its own marker (the runner's watchdog
+# watches the reading alone); for "is the run getting anywhere" either counts.
+CONVERT_PROGRESS = os.path.join(STATE_DIR, "convert-progress")
+
+
+def runner_state():
+    """{"running": False}, or {"running": True, "since": "HH:MM", "stalledFor": seconds since
+    the run last made progress (or started): a run that gets nowhere for long is stuck}."""
+    pid = lock_pid()
+    if pid is None or not is_runner(pid):
         return {"running": False}
     started = ""
     try:
         started = open(os.path.join(LOCK_DIR, "started")).read().strip()
     except OSError:
         pass
-    return {"running": True, "since": started}
+    marks = []
+    for p in (PROGRESS, CONVERT_PROGRESS, LOCK_DIR) if os.path.exists(PROGRESS) else (wiki_events.NOW, LOCK_DIR):
+        try:
+            marks.append(os.path.getmtime(p))
+        except OSError:
+            pass
+    stalled = max(0, int(time.time() - max(marks))) if marks else 0
+    return {"running": True, "since": started, "stalledFor": stalled}
+
+
+# ------------------------------------------------------------------ restart --------
+def process_table():
+    """{pid: (parent pid, state)} for every process on this Mac (ps -A)."""
+    try:
+        r = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,stat="], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    table = {}
+    for line in r.stdout.splitlines():
+        f = line.split()
+        if len(f) >= 2 and f[0].isdigit() and f[1].isdigit():
+            table[int(f[0])] = (int(f[1]), f[2] if len(f) > 2 else "")
+    return table
+
+
+def process_tree(root, table=None):
+    """root and every process it started, and they started, found by their parent pids."""
+    table = process_table() if table is None else table
+    kids = {}
+    for pid, (ppid, _) in table.items():
+        kids.setdefault(ppid, []).append(pid)
+    out, todo = [], [root]
+    while todo:
+        p = todo.pop()
+        if p in out or p <= 1:
+            continue
+        out.append(p)
+        todo += kids.get(p, [])
+    return out
+
+
+def still_alive(pids):
+    """Those of pids still running (a finished process its parent has not collected yet,
+    a zombie, counts as gone)."""
+    table = process_table()
+    return [p for p in pids if p in table and not table[p][1].startswith("Z")]
+
+
+def signal_all(pids, sig):
+    for p in pids:
+        try:
+            os.kill(p, sig)
+        except OSError:
+            pass
+
+
+def stop_runner(pid, grace=5.0):
+    """Stop the runner and everything it started: SIGTERM to the whole tree, then SIGKILL
+    to whatever is left after `grace` seconds. Returns how many processes it stopped."""
+    pids = process_tree(pid)
+    signal_all(pids, signal.SIGTERM)
+    deadline = time.time() + grace
+    while time.time() < deadline and still_alive(pids):
+        time.sleep(0.2)
+    left = still_alive(pids)
+    if left:
+        # What is left, and anything it started while it was stopping.
+        left = sorted(set(left) | set(q for p in left for q in process_tree(p)))
+        signal_all(left, signal.SIGKILL)
+        deadline = time.time() + 2
+        while time.time() < deadline and still_alive(left):
+            time.sleep(0.1)
+    return len(pids)
+
+
+def stale_lock():
+    """Whether runner.lock is left over from a runner that is gone. A lock with no pid yet
+    is a runner starting this instant, unless it is old."""
+    if not os.path.isdir(LOCK_DIR):
+        return False
+    pid = lock_pid()
+    if pid is not None:
+        return not is_runner(pid)
+    try:
+        return time.time() - os.path.getmtime(LOCK_DIR) > 10
+    except OSError:
+        return False
+
+
+def restart():
+    """Stop a run (stuck, or just running) and start a fresh one. Returns the message."""
+    pid = lock_pid()
+    running = pid is not None and is_runner(pid)
+    if running:
+        stop_runner(pid)
+    cleared = not running and stale_lock()
+    if running or cleared:
+        shutil.rmtree(LOCK_DIR, ignore_errors=True)
+        wiki_events.set_now("idle")
+    if running:
+        wiki_events.emit("restart", msg="Processing was restarted from the Upload page")
+    else:
+        wiki_events.emit("process-requested", msg="Processing was started from the Upload page"
+                         + (" (a lock left by an earlier run was cleared)" if cleared else ""))
+    start_runner(restart=True)
+    if running:
+        return "Processing was stopped and started again. Whatever it had not finished is picked up again."
+    if cleared:
+        return "Nothing was running (an earlier run had left its lock behind, now cleared). Processing has started."
+    return "Nothing was running. Processing has started."
 
 
 # Time left and cost, from the batches measured so far (scripts/wiki_estimate.py). The
@@ -262,12 +416,11 @@ ESTIMATE = wiki_estimate.Tracker()
 def estimate(cfg, queue, runner):
     try:
         ESTIMATE.read([os.path.join(STATE_DIR, "events.1.jsonl"), wiki_events.EVENTS])
-        fast = cfg.get("engine") != "local" and cfg.get("pipeline") != "classic"
-        fast_cfg = cfg.get("fast") if isinstance(cfg.get("fast"), dict) else {}
+        fast = wiki_settings.reading(cfg) == "fast"
+        eff = wiki_settings.effective(cfg)
         return ESTIMATE.estimate(len(queue["intake"]), cfg.get("engine"),
-                                 1 if fast else cfg.get("parallelBatches", 3),   # fast: one batch at a time
-                                 (fast_cfg.get("docsPerBatch") or 40) if fast else cfg.get("docsPerBatch"),
-                                 runner.get("running", False), fast=fast)
+                                 1 if fast else eff["parallelBatches"],   # fast: one batch at a time
+                                 eff["docsPerBatch"], runner.get("running", False), fast=fast)
     except Exception as e:  # an estimate is never worth breaking the status for
         print(f"estimate: {e}", file=sys.stderr)
         return {"ready": False}
@@ -289,6 +442,7 @@ def status():
         "queue": queue,
         "needsReview": list_queue("raw/_needs-review"),
         "review": {"open": wiki_review.count_open(), "rev": wiki_review.revision()},
+        "actions": {"open": wiki_actions.count_open(), "rev": wiki_actions.revision()},
         "runner": runner,
         "now": wiki_events.read_now(),
         "estimate": estimate(cfg, queue, runner),
@@ -325,41 +479,56 @@ def with_live_script(html):
 
 # ------------------------------------------------------------------- settings ------
 CONFIG_LOCK = threading.Lock()
-# What the Settings panel may change: key -> (type, low, high). Everything else in
-# wiki.config.json (engine, port, the local model) stays as the installer wrote it.
-SETTABLE = {"parallelBatches": (int, 1, 6), "docsPerBatch": (int, 1, 50),
-            "maxUploadMb": (int, 1, 4096), "maxSpendPerBatchUsd": (float, 0.5, 100.0)}
+# What the Settings panel may change: the performance mode ("performance"), and figures by
+# hand, key -> (type, low, high), the ranges from scripts/wiki_settings.py. A figure set by
+# hand wins over the mode's (Settings then shows "Custom"); choosing a mode drops them.
+# Everything else in wiki.config.json (engine, port, the local model) stays as the
+# installer wrote it.
+SETTABLE = {k: (kind,) + wiki_settings.LIMITS[k] for k, kind in
+            (("parallelBatches", int), ("docsPerBatch", int), ("maxUploadMb", int), ("maxSpendPerBatchUsd", float))}
 LABELS = {"parallelBatches": "batches read at once", "docsPerBatch": "documents per batch",
           "maxUploadMb": "the upload limit in MB", "maxSpendPerBatchUsd": "the spending cap per batch in USD"}
+READINGS = ("fast", "classic", "local")
 
 
 def number(v, kind, default):
+    if isinstance(v, bool):
+        return default
     try:
         return kind(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
+
+
+def shown_settings(cfg):
+    """What Settings shows of a config: the figures in effect, whatever set them."""
+    eff = wiki_settings.effective(cfg)
+    return {
+        "title": cfg.get("title") or "",
+        "company": cfg.get("company") or "",
+        "pipeline": "classic" if cfg.get("pipeline") == "classic" else "fast",
+        "performance": wiki_settings.shown_mode(cfg),
+        # Fast reading has batches of its own size (fast.docsPerBatch); this is the one in use.
+        "parallelBatches": eff["parallelBatches"],
+        "docsPerBatch": eff["docsPerBatch"],
+        "maxUploadMb": eff["maxUploadMb"],
+        "maxSpendPerBatchUsd": eff["maxSpendPerBatchUsd"],
+        "review": wiki_jev.review_settings(cfg),
+    }
 
 
 def settings_view():
     cfg = load_config()
-    engine = cfg.get("engine") or "claude"
-    spend = cfg.get("maxSpendPerBatchUsd", cfg.get("maxSpendPerRunUsd", 5))
-    fast = engine != "local" and cfg.get("pipeline") != "classic"   # Fast is the default
-    fast_docs = number((cfg.get("fast") or {}).get("docsPerBatch") if isinstance(cfg.get("fast"), dict) else None, int, 0)
-    return {
-        "engine": engine,
-        "title": cfg.get("title") or "",
-        "company": cfg.get("company") or "",
-        "parallelBatches": max(1, min(6, number(cfg.get("parallelBatches"), int, 3))),
-        "pipeline": "classic" if cfg.get("pipeline") == "classic" else "fast",
-        # Fast reading has batches of its own size (fast.docsPerBatch); the field edits that one.
-        "docsPerBatch": (fast_docs or 40) if fast else (number(cfg.get("docsPerBatch"), int, 0)
-                                                        or (20 if engine == "local" else 8)),
-        "maxUploadMb": round(max_upload_bytes() / 1024 / 1024),
-        "maxSpendPerBatchUsd": number(spend, float, 5.0),
-        "review": wiki_jev.review_settings(cfg),
+    view = shown_settings(cfg)
+    view.update({
+        "engine": cfg.get("engine") or "claude",
+        "reading": wiki_settings.reading(cfg),
+        "modes": wiki_settings.presets_for(cfg),   # each mode's figures for this wiki's reading
+        "modesByReading": {rd: {m: wiki_settings.preset(m, rd) for m in wiki_settings.MODES} for rd in READINGS},
+        "speedMax": wiki_settings.SPEED_MAX,
         "jev": {"available": wiki_jev.available(cfg), "key": bool(KEY.get())},
-    }
+    })
+    return view
 
 
 def clean_text(v, limit):
@@ -368,10 +537,19 @@ def clean_text(v, limit):
 
 
 def change_settings(body):
-    """Apply the owner's changes to wiki.config.json. Returns (changed keys, errors)."""
+    """Apply the owner's changes to wiki.config.json. Returns (changed, errors): changed
+    lists what Settings now shows differently ("performance" when the mode shown changed,
+    a figure when the one in effect changed). A body with a mode and figures applies the
+    mode first, then the figures."""
     if not isinstance(body, dict):
         return [], ["the settings were not sent as an object"]
-    errors, updates = [], {}
+    errors, updates, perf = [], {}, None
+    if "performance" in body:
+        if isinstance(body["performance"], str) and body["performance"] in wiki_settings.MODES:
+            perf = body["performance"]
+        else:
+            errors.append("the performance mode must be " + ", ".join(wiki_settings.MODES[:-1])
+                          + " or " + wiki_settings.MODES[-1])
     if "title" in body:
         t = clean_text(body["title"], 80)
         if t:
@@ -400,7 +578,10 @@ def change_settings(body):
             errors.append("the review mode must be auto or manual")
         elif bar is None or not 0.5 <= bar <= 0.99:
             errors.append("the auto-review confidence must be between 50% and 99%")
-        else:
+        elif {"mode": mode, "autoConfidence": round(bar, 2)} != r:
+            # Only an actual change is saved: a mode written with every other change would
+            # look like a choice the owner made (the installer turns Auto-review on unless
+            # the owner chose).
             updates["review"] = {"mode": mode, "autoConfidence": round(bar, 2)}
     if errors:
         return [], errors
@@ -411,19 +592,23 @@ def change_settings(body):
                 cfg = json.load(f)
         except (OSError, ValueError):
             return [], ["wiki.config.json could not be read; fix or restore it first"]
+        if not isinstance(cfg, dict):
+            return [], ["wiki.config.json could not be read; fix or restore it first"]
+        before = copy.deepcopy(cfg)
+        if perf:
+            wiki_settings.apply_mode(cfg, perf)   # its figures, for every way of reading
         pipeline = updates.get("pipeline", cfg.get("pipeline")) or "fast"
         if "docsPerBatch" in updates and cfg.get("engine") != "local" and pipeline == "fast":
             # Fast reading's batches are its own (fast.docsPerBatch), not the classic size.
             fast_cfg = dict(cfg.get("fast") or {}) if isinstance(cfg.get("fast"), dict) else {}
-            if fast_cfg.get("docsPerBatch") != updates["docsPerBatch"]:
-                fast_cfg["docsPerBatch"] = updates["docsPerBatch"]
-                updates["fast"] = fast_cfg
-            del updates["docsPerBatch"]
-        changed = [k for k, v in updates.items() if cfg.get(k) != v]
-        if changed:
-            cfg.update(updates)
-            if "maxSpendPerBatchUsd" in changed:
-                cfg.pop("maxSpendPerRunUsd", None)   # the older name, now replaced
+            fast_cfg["docsPerBatch"] = updates.pop("docsPerBatch")
+            updates["fast"] = fast_cfg
+        cfg.update(updates)
+        if "maxSpendPerBatchUsd" in updates:
+            cfg.pop("maxSpendPerRunUsd", None)   # the older name, now replaced
+        old, new = shown_settings(before), shown_settings(cfg)
+        changed = [k for k in new if old[k] != new[k]]
+        if cfg != before:
             tmp = path + f".{secrets.token_hex(4)}.tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -479,7 +664,7 @@ class ReviewWorker(threading.Thread):
     def step(self):
         if not wiki_jev.available():
             return
-        items = wiki_review.list_open()
+        items = wiki_review.list_open(places=False)
         rs = wiki_jev.review_settings()
         force, self.force = self.force, set()
         due = [i for i in items if wiki_jev.needs_score(i, i["id"] in force)]
@@ -503,12 +688,24 @@ def review_view():
     cfg = load_config()
     return {
         "items": wiki_review.list_open(),
-        "done": wiki_review.list_done(30),
+        "done": wiki_review.list_done(100),
+        "doneTotal": wiki_review.count_done(),
         "engine": cfg.get("engine") or "claude",
         "review": wiki_jev.review_settings(cfg),
         "jev": {"available": wiki_jev.available(cfg), "key": bool(KEY.get()),
                 "busy": WORKER.busy, "error": WORKER.error},
         "rev": wiki_review.revision(),
+    }
+
+
+def actions_view():
+    cfg = load_config()
+    return {
+        "items": wiki_actions.list_open(),
+        "done": wiki_actions.list_done(50),
+        # Actions come from Claude applying review answers; the model on this Mac makes none.
+        "available": (cfg.get("engine") or "claude") != "local",
+        "rev": wiki_actions.revision(),
     }
 
 
@@ -520,13 +717,16 @@ def rebuild_site():
                      stderr=subprocess.DEVNULL, start_new_session=True)
 
 
-def start_runner():
-    """Start the runner now. Under launchd the viewer's label names the runner's."""
+def start_runner(restart=False):
+    """Start the runner now. Under launchd the viewer's label names the runner's. restart:
+    the runner was just stopped, so launchd is told to start it even if it has not yet
+    noticed (kickstart -k)."""
     label = os.environ.get("XPC_SERVICE_NAME", "")
     if label.endswith(".viewer"):
         runner = label[: -len(".viewer")] + ".runner"
         try:
-            r = subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/{runner}"],
+            r = subprocess.run(["launchctl", "kickstart"] + (["-k"] if restart else [])
+                               + [f"gui/{os.getuid()}/{runner}"],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
             if r.returncode == 0:
                 return "started"
@@ -539,6 +739,53 @@ def start_runner():
 
 
 # -------------------------------------------------------------------- events -------
+RUN_START = b'"type": "run-start"'
+
+
+def last_run_start(path, run):
+    """Byte offset of the run-start event of `run` in the log, or None (not there, or the
+    last run-start belongs to another run)."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    i = data.rfind(RUN_START)
+    if i < 0:
+        return None
+    start = data.rfind(b"\n", 0, i) + 1
+    end = data.find(b"\n", i)
+    try:
+        rec = json.loads(data[start:end if end >= 0 else len(data)])
+    except ValueError:
+        return None
+    return start if isinstance(rec, dict) and rec.get("run") == run else None
+
+
+def history(path, lines):
+    """Where the page's history begins: the last `lines` lines, or, while a run is going,
+    from that run's start if it began earlier (a large upload writes thousands of events,
+    and a page opened in the middle needs every file's). Returns (offset in the log, lines
+    from the rotated log that come first: the run started before the log rotated)."""
+    off = history_offset(path, lines)
+    # The run going now (its id is on the live line from its first step); a rebuild, or a
+    # run still settling before its run-start, replays nothing older than the usual lines.
+    run = (wiki_events.read_now() or {}).get("run") if runner_state()["running"] else None
+    if not run:
+        return off, []
+    start = last_run_start(path, run)
+    if start is not None:
+        return min(off, start), []
+    old = path[: -len(".jsonl")] + ".1.jsonl"
+    begin = last_run_start(old, run)
+    if begin is None:
+        return off, []
+    with open(old, "rb") as f:
+        f.seek(begin)
+        earlier = [ln for ln in f.read().split(b"\n") if ln.strip()]
+    return 0, earlier
+
+
 def history_offset(path, lines):
     """Byte offset where the last `lines` lines of the log begin."""
     try:
@@ -705,6 +952,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self._send_json(200, status())
                 if rel == "api/review":
                     return self._send_json(200, review_view())
+                if rel == "api/actions":
+                    return self._send_json(200, actions_view())
                 if rel == "api/settings":
                     return self._send_json(200, settings_view())
                 if rel == "api/events" and not head_only:
@@ -742,12 +991,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         """Server-sent events: recent history, then new lines as they are written."""
         path = wiki_events.EVENTS
         since = self.headers.get("Last-Event-ID") or (query.get("since") or [""])[0]
+        earlier = []
         try:
             offset = int(since)
         except ValueError:
-            offset = history_offset(path, HISTORY_LINES)
+            offset, earlier = history(path, HISTORY_LINES)
         self._headers(200, "text/event-stream; charset=utf-8", None, {"X-Frame-Options": "DENY"})
         self.wfile.write(b"retry: 2000\n\n")
+        if earlier:   # no id: a reconnect resumes in the current log
+            self.wfile.write(b"".join(b"data: " + ln + b"\n\n" for ln in earlier))
         self.wfile.flush()
         last_beat, buf, now_seen = time.time(), b"", None
         while True:
@@ -810,7 +1062,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if rel == "api/process":
             wiki_events.emit("process-requested")
             return self._send_json(200, {"ok": True, "runner": start_runner()})
-        if rel in ("api/review/answer", "api/review/score", "api/settings", "api/settings/jev-key"):
+        if rel == "api/restart":
+            self._drain_small()
+            return self._send_json(200, {"ok": True, "message": restart()})
+        if rel in ("api/review/answer", "api/review/reopen", "api/review/score", "api/actions/update",
+                   "api/settings", "api/settings/jev-key"):
             body = self._read_json()
             if body is None:
                 return self._send_json(400, {"ok": False, "message": "The request was not valid JSON."})
@@ -838,6 +1094,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
             start_runner()
         return self._send_json(200 if res["ok"] else 409, res)
 
+    def _review_reopen(self, body):
+        res = wiki_review.reopen(str(body.get("id") or ""))
+        return self._send_json(200 if res["ok"] else 409, {"ok": res["ok"], "message": res["message"]})
+
+    def _actions_update(self, body):
+        iid = body.get("id")
+        fields = {}
+        if "assignee" in body:
+            a = body["assignee"] if body["assignee"] is not None else ""
+            if not isinstance(a, str) or a not in wiki_actions.ASSIGNEES:
+                return self._send_json(400, {"ok": False, "message": "The assignee must be ai_agent, employee, "
+                                                                     "external, or empty for no one."})
+            fields["assignee"] = a
+        if "status" in body:
+            if not isinstance(body["status"], str) or body["status"] not in wiki_actions.STATUSES:
+                return self._send_json(400, {"ok": False, "message": "The status must be open, done or dismissed."})
+            fields["status"] = body["status"]
+        if not isinstance(iid, str) or not iid:
+            return self._send_json(400, {"ok": False, "message": "Say which action (its id)."})
+        if not fields:
+            return self._send_json(400, {"ok": False, "message": "Nothing to change: send an assignee or a status."})
+        res = wiki_actions.update(iid, **fields)
+        return self._send_json(409 if res.get("missing") else 200, {"ok": res["ok"], "message": res["message"]})
+
     def _review_score(self, body):
         if not wiki_jev.available():
             return self._send_json(409, {"ok": False, "message":
@@ -846,7 +1126,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send_json(409, {"ok": False, "message": "Add a TypeSafe API key in Settings first."})
         ids = body.get("ids")
         ids = [i for i in ids if isinstance(i, str)] if isinstance(ids, list) else \
-            [i["id"] for i in wiki_review.list_open()]
+            [i["id"] for i in wiki_review.list_open(places=False)]
         WORKER.error = ""
         WORKER.nudge(ids)
         return self._send_json(200, {"ok": True, "message": f"Asking Jev about {len(ids)} question(s)."})
@@ -925,6 +1205,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                          duplicate=True if duplicate else None)
         return self._send_json(200, {"ok": True, "file": path, "queue": queue,
                                      "duplicate": duplicate})
+
+    def _drain_small(self):
+        """Read and ignore a small body (a POST that needs none may still send {})."""
+        try:
+            left = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            left = 0
+        if 0 < left <= 65536:
+            self.rfile.read(left)
+        elif left > 65536:
+            self.close_connection = True
 
     def _drain(self):
         try:

@@ -3,5 +3,6 @@
   "company": "",
   "port": 8765,
   "engine": "claude",
-  "maxSpendPerBatchUsd": 5
+  "performance": "maximum",
+  "settingsVersion": 2
 }

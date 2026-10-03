@@ -28,6 +28,8 @@ import os
 import sys
 import threading
 
+import wiki_settings
+
 MIN_BATCHES = 2      # batches measured before any figure is shown
 WINDOW = 10          # the most recent clean batches the rates come from
 SLOW_SHARE = 0.15    # a batch past its expected time still has this share of it to go
@@ -162,7 +164,8 @@ class Tracker:
         now = now if now is not None else datetime.datetime.now().timestamp()
         engine = "local" if engine == "local" else "claude"
         bucket = "fast" if fast and engine == "claude" else engine
-        lanes = 1 if engine == "local" else min(max(1, int(number(lanes) or 3)), 6)
+        lanes = 1 if engine == "local" else min(max(1, int(number(lanes) or wiki_settings.DEFAULT_SPEED)),
+                                                 wiki_settings.SPEED_MAX)
         batch_size = max(1, int(number(batch_size) or (20 if engine == "local" else 8)))
         hist = list(self.history[bucket])
         run = self.run if running and self.run and self.run["end"] is None else None
@@ -237,8 +240,10 @@ def main():
     for dirpath, _, files in os.walk(os.path.join(wiki, "raw", "_intake")):
         waiting += sum(1 for f in files if not f.startswith(".") and f != "README.md")
     running = os.path.isdir(os.path.join(state, "runner.lock"))
-    print(json.dumps(tr.estimate(waiting, cfg.get("engine"), cfg.get("parallelBatches", 3),
-                                 cfg.get("docsPerBatch"), running), indent=2))
+    cfg = cfg if isinstance(cfg, dict) else {}
+    eff, fast = wiki_settings.effective(cfg), wiki_settings.reading(cfg) == "fast"   # the figures a run uses
+    print(json.dumps(tr.estimate(waiting, cfg.get("engine"), 1 if fast else eff["parallelBatches"],
+                                 eff["docsPerBatch"], running, fast=fast), indent=2))
 
 
 if __name__ == "__main__":

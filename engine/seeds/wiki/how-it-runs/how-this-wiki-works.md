@@ -14,8 +14,9 @@ needs none (`"engine"` in `wiki.config.json` says which one reads).
 
 ## Adding documents and notes
 
-Click **Upload** at the top right of any page. Drop files or whole folders onto the
-Upload page; it sorts them into a queue inside the wiki folder:
+Click **Upload** at the top right of any page. Drop anything onto the Upload page, files
+or whole folders, or click its box to choose files; it sorts them into a queue inside the
+wiki folder:
 
 | What you upload | Queue | What happens |
 |---|---|---|
@@ -36,20 +37,44 @@ When something needs a decision (two documents disagree, a fact is uncertain, or
 could not be read after two tries), it becomes a question in the Upload page's
 **Review** tab, with a few answers to choose from. Every **Needs review** label and log
 line links to its question. Answer by choosing one, or write your own; the next run
-applies it to the wiki. A file that could not be read can be sent back to be read again
+applies it to the wiki. Each question links to its document wherever it is now, and a
+question about a picture shows the picture. A file that could not be read can be sent back to be read again
 (with a note from you saying what it is), set aside in `raw/_set-aside/`, or left in
 `raw/_needs-review/`. Nothing is ever deleted. Each question is also recorded in the
 [[_review|Review queue]].
 
-**Jev**, TypeSafe's decision model, can judge the answers for you. Save a TypeSafe API key
-in **Settings** (top right of the Upload page) and each answer shows how likely Jev
-thinks it is. In **Auto-review**, Jev's answer is applied when the documents settle the
-question and its confidence is at least your bar (70% unless you change it). A question
-that needs your own knowledge or decision always waits for you. Jev is used only when
-Claude reads your documents.
+**Jev**, TypeSafe's decision model, can judge the answers for you. The installer asks
+for a TypeSafe API key (or save one later in **Settings**, top right of the Upload page),
+and each answer shows how likely Jev thinks it is. In **Manual**, you choose. In
+**Auto-review**, Jev's answer is applied when the documents settle the question and Jev
+is at least 70% sure, and each decision is logged in the Review tab, with how Jev scored
+every answer; **Change this answer** opens the question again for you (not for a file that
+could not be read: that answer moved the file). A question that
+needs your own knowledge or decision always waits for you. Jev is used only when Claude
+reads your documents.
 
-**Settings** also sets the reading speed (how many batches Claude reads at once), the
-wiki's title and your company's name.
+## Actions
+
+When an answer means something must be done outside the wiki (a return to correct, an
+amount to chase, a licence to renew), Claude drafts it as an **action** in the Upload
+page's **Actions** tab when it applies the answer: why, the steps, and an instruction
+brief for each kind of doer: an AI agent with a browser (which prepares everything and
+stops to ask you before submitting or paying anything), a member of your staff, or an
+outside professional (your tax agent, company secretary, accountant or lawyer). Choose
+who does it, copy or download the brief, and mark it done. Actions are kept in
+`actions/`.
+
+## Settings
+
+**Settings**, top right of the Upload page, sets:
+
+- **Reading speed**: how many documents Claude reads at once, from 3 to 18 (the fastest,
+  and the default). Speed changes how soon an upload is done, not what it costs.
+- **Performance mode**: Economical, Moderate or Maximum performance (the default). Each
+  sets how many documents go in a batch, the largest file the Upload page takes, and a
+  spending cap per batch. A document costs the same in every mode; the cap stops a batch
+  costing more than expected, and the documents it did not reach wait for the next run.
+- How review questions are answered, the Jev key, the wiki's title and your company's name.
 
 ## What runs in the background
 
@@ -57,9 +82,10 @@ Two background agents start when you log in:
 
 - **The runner** (`scripts/wiki_runner.sh`) wakes when something lands in the queue,
   and every 15 minutes in case it missed one. It waits until files finish copying, then:
-  1. takes new documents in batches (8 at a time with Claude, 20 with the model on this
-     Mac; `docsPerBatch` in `wiki.config.json`). Claude reads up to 3 batches at the same
-     time (`parallelBatches`; the first batch always runs alone), and the site is
+  1. takes new documents in batches, as large as the performance mode says (100 at a
+     time with Claude in Maximum performance; `scripts/wiki_settings.py` has the
+     figures). Claude reads up to 18 documents at the same time (reading speed,
+     `parallelBatches`; the first document always goes alone), and the site is
      refreshed every few minutes, so the first pages appear while the rest are being read;
   2. converts the batches to Markdown ahead of the reading (`scripts/to_markdown.py`, see
      [[raw-to-markdown-conversion]]) and reads each one: Claude, or the model on this Mac
@@ -81,7 +107,9 @@ Two background agents start when you log in:
   network, and only the Upload page it served can add files.
 
 Logs are in `~/Library/Logs/wiki-starter/`; the Upload page shows the same activity in
-plain language. **Process now** on the Upload page runs the runner straight away.
+plain language. **Process now** on the Upload page runs the runner straight away. If a run
+shows no progress for 15 minutes, the Upload page offers **Restart processing**: what is
+filed stays filed, and the rest is read again.
 
 ## What Claude may do when nobody is watching
 

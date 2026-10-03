@@ -19,6 +19,8 @@ files the originals. You read the result in your browser. Nothing is published.
     **16 GB of memory**. It builds the same kinds of pages as Claude and checks every
     figure against its document, more slowly (a few minutes a document) and with plainer
     writing. `INSTALL.md` has the measured comparison.
+- Optional, with Claude: a **TypeSafe API key** from console.typesafe.ai for Jev, which
+  can answer the review questions your documents settle. You can also add it later.
 - About 3 GB of free disk space (about 9 GB with the model on this Mac), and an internet
   connection.
 
@@ -33,7 +35,7 @@ Open **Terminal** (Applications → Utilities), paste this line and press Return
 curl -fsSL https://raw.githubusercontent.com/arkceo/wiki-starter/main/install.sh | bash
 ```
 
-The installer has 7 steps, takes 10–20 minutes the first time, and shows ✓ as each step
+The installer has 8 steps, takes 10–20 minutes the first time, and shows ✓ as each step
 finishes. It asks for:
 
 1. **Your Mac password**, once, to install Homebrew. This is skipped if Homebrew is
@@ -48,11 +50,20 @@ finishes. It asks for:
    - **This Mac only:** there's no sign-in. The installer downloads the model
      (Qwen3.5-9B, about 6.2 GB; it resumes if interrupted), checks it, and starts it once
      to make sure it works.
+5. **Jev, the review judge** (Claude only, optional): paste a TypeSafe API key (the
+   installer opens console.typesafe.ai), or press Return to skip and add one later in
+   **Settings**. Jev checks the key first; if TypeSafe refuses it you can paste it again.
+   With a key, **Auto-review** starts on. With This Mac only, nothing is asked: nothing
+   leaves the Mac.
 
 It finishes by processing a welcome note as a test and opening the wiki in your browser.
 If macOS shows **Background Items Added**, leave it allowed.
 
 **If any step fails, paste the same line again.** Finished steps are skipped.
+
+To install without the questions, the answers can be given in advance as environment
+variables (`WIKI_ENGINE`, `WIKI_TYPESAFE_KEY`, `WIKI_JEV=skip` and others); `INSTALL.md`
+lists them.
 
 ## Daily use
 
@@ -65,10 +76,12 @@ If macOS shows **Background Items Added**, leave it allowed.
   (upload, convert, read and write, file), an "n of m done" count, a live line saying what
   the wiki is doing at that moment, and a log of what it has done. You get a notification
   when the wiki has been updated, and open wiki pages show the new version by themselves.
-- **Large uploads** are read in batches: 8 documents each with Claude, up to 3 batches at
-  the same time, and 20 at a time with the model on this Mac. Documents are converted to
-  text ahead of the reading, and the site is refreshed every few minutes, so the first
-  pages appear while the rest are still being read.
+- **Large uploads** are read in batches, as large as the performance mode says (100
+  documents each with Claude in Maximum performance, the default), with Claude reading up
+  to 18 documents at the same time. Documents are converted to text ahead of the reading,
+  and the site is refreshed every few minutes, so the first pages appear while the rest
+  are still being read. A file that crashes or hangs the converter is marked and set
+  aside after two tries instead of stopping the rest.
 - **Fast reading** (the default with Claude; Settings → Reading speed): Claude reads many
   documents at once, one question each, and the wiki engine checks every answer against
   the document and writes the pages itself, the way it does with the model on this Mac.
@@ -94,17 +107,29 @@ If macOS shows **Background Items Added**, leave it allowed.
   count on the tab. Every **Needs review** label links to its question. Choose an answer
   or write your own; the wiki applies it on its next run. A file that could not be read
   can be read again with your note saying what it is, or set aside. Nothing is deleted.
+  Each question links to its document wherever it has been filed, and a question about a
+  picture shows the picture.
   The *Review queue* page keeps the full record. With the model on this Mac, a figure a
   later document changes (payment terms, a price, a fee, a notice period, an address) is
   caught by code and listed with both values and their documents.
-- **Auto-review with Jev** (Claude only, optional): save a TypeSafe API key in
-  **Settings** and Jev, TypeSafe's decision model, scores every answer. Switch the Review
-  tab to **Auto-review** and Jev's answer is applied when the documents themselves settle
-  the question (Jev checks this first) and its confidence is at least 70% (you can change
-  this). A question that needs your own knowledge or decision always waits for you.
-- **Settings** (top right of the Upload page): how many batches Claude reads at once
-  (1 slowest, 3 moderate, 6 fastest), the review mode, the Jev key, the title, your
-  company's name, and batch size, upload limit and spending cap under *Advanced*.
+- **Auto-review with Jev** (Claude only, optional): give the installer a TypeSafe API key,
+  or save one later in **Settings**, and Jev, TypeSafe's decision model, scores every
+  answer. In **Auto-review** (on from the start with a key given to the installer; switch
+  it in the Review tab) Jev's answer is applied when the documents themselves settle the
+  question (Jev checks this first) and it is at least 70% sure. Every decision Jev makes
+  is logged in the Review tab with how it scored each answer, and **Change this answer**
+  opens a question again for you (any answer, yours too, except about a file that could
+  not be read: that answer moved the file). A question that needs your own
+  knowledge or decision always waits for you.
+- **Actions:** when an answer means something must be done outside the wiki (a return to
+  correct, an amount to chase), Claude drafts it in the Upload page's **Actions** tab with
+  an instruction brief for an AI agent, a member of staff or an outside professional.
+  Choose who does it, copy or download the brief, and mark it done.
+- **Settings** (top right of the Upload page): reading speed (3 to 18 documents at once;
+  18, the fastest, is the default; speed changes how soon an upload is done, not its
+  cost), the performance mode (Economical, Moderate or Maximum performance, which set the
+  batch size, the largest upload and the spending cap per batch), the review mode, the
+  Jev key, the title and your company's name.
 - **Photos and scans:** photos (including iPhone HEIC) are read with OCR, and with Claude
   also looked at as pictures, so a receipt photographed on a phone is read properly. A
   photo with no words in it (a delivery, a site, a product) gets a page saying what it
@@ -138,6 +163,7 @@ skill, say "wrap up" at the end of a conversation, and upload the file it gives 
 |---|---|
 | Files stay "Queued" | Open System Settings → General → Login Items & Extensions → *Allow in the Background*, turn **bash** on, then press **Process now**. |
 | Files say "Waiting to convert" for a long time | Normal for a large upload: they are in a later batch. The live line shows which batch is being read. |
+| "Nothing has moved for …" on the Upload page | Press **Restart processing** there. What is filed stays filed; the rest is read again. |
 | Update says "The wiki is processing files right now" | Wait until the Upload page shows **Idle**, then update again. If it already showed Idle, try again in 15 minutes. |
 | The Upload page says "Forbidden" | Reload the page. The wiki restarted, which an update does. |
 | "Claude could not run" | Paste the install line again and replace the sign-in. |
@@ -177,11 +203,13 @@ for p in ~/Library/LaunchAgents/local.wiki-starter.*.plist; do
 done
 ```
 
-**2. Remove the Anthropic sign-in from the Keychain** (it is there only if Claude was used):
+**2. Remove the Anthropic sign-in and the TypeSafe key from the Keychain** (they are there
+only if Claude was used):
 
 ```sh
 security delete-generic-password -s wiki-starter -a claude-oauth-token 2>/dev/null
 security delete-generic-password -s wiki-starter -a anthropic-api-key 2>/dev/null
+security delete-generic-password -s wiki-starter -a typesafe-api-key 2>/dev/null
 ```
 
 **3. Remove the Desktop shortcuts, the logs and the model on this Mac** (if it was

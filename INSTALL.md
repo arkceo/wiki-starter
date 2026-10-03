@@ -12,6 +12,9 @@
     spend limit there); or
   - **This Mac only**: no account. A Mac with Apple silicon and **16 GB of memory**, and
     about 6.2 GB more disk space for the model.
+- Optional, with Claude: a **TypeSafe API key** from
+  [console.typesafe.ai](https://console.typesafe.ai) for **Jev**, the review judge
+  (Auto-review). It can also be added later.
 
 No GitHub account, no website and no other service is needed.
 
@@ -26,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/arkceo/wiki-starter/main/install.sh
 Paste the line rather than downloading the file: macOS blocks downloaded scripts from
 opening with a double-click.
 
-The installer works through seven steps and prints a tick for each. The first run takes
+The installer works through eight steps and prints a tick for each. The first run takes
 10–20 minutes, mostly downloading tools. It asks for:
 
 1. **Your Mac password**, once, to install [Homebrew](https://brew.sh). Skipped if
@@ -41,11 +44,38 @@ The installer works through seven steps and prints a tick for each. The first ru
    With the model on this Mac there is no sign-in: the installer downloads the model
    from Hugging Face, checks it against its published checksum, and starts it once to
    make sure it answers.
+5. With Claude, a **TypeSafe API key** for **Jev**, the review judge (optional). Jev
+   scores the answers to each review question, and in Auto-review answers the ones the
+   documents themselves settle. The installer opens console.typesafe.ai; paste the key
+   when asked, or press Return to skip and add one later in **Settings** on the Upload
+   page. Jev checks the key: one TypeSafe refuses can be pasted again (after three tries
+   the step is skipped), and one that cannot be checked just then is stored anyway. A
+   key is stored in the **Keychain** and turns **Auto-review** on, unless you already
+   chose a review mode. With the model on this Mac this step asks nothing: nothing
+   leaves the Mac.
 
-To switch later, run the install line again and choose the other option. Your pages and
-documents stay as they are.
+To switch between Claude and the model on this Mac later, run the install line again and
+choose the other option. Your pages and documents stay as they are.
 
 If anything fails, run the same line again. Finished steps are skipped.
+
+### Answers in advance
+
+To install without the questions, give the answers as environment variables in front of
+`bash` in the install line, for example `curl -fsSL … | WIKI_JEV=skip bash`:
+
+| Variable | Answers |
+|---|---|
+| `WIKI_COMPANY`, `WIKI_TITLE` | the company name and the wiki title |
+| `WIKI_ENGINE` | who reads: `claude` or `local` |
+| `WIKI_AUTH` | the Anthropic sign-in: `subscription`, `apikey` or `skip` |
+| `WIKI_OAUTH_TOKEN`, `WIKI_API_KEY` | the subscription token, or the API key |
+| `WIKI_TYPESAFE_KEY` | the TypeSafe API key for Jev |
+| `WIKI_JEV=skip` | no TypeSafe key for now |
+| `WIKI_SKIP_SMOKE_TEST=1` | no welcome-note test at the end |
+
+A key typed into the install line stays in Terminal's history; paste it at the prompt
+when you can.
 
 ## What gets installed
 
@@ -58,7 +88,7 @@ If anything fails, run the same line again. Finished steps are skipped.
 | `~/Library/LaunchAgents/local.wiki-starter.<title>.*.plist` | the runner and the viewer |
 | `~/Library/Logs/wiki-starter/` | logs (no secrets) |
 | Desktop | **Open Wiki** |
-| Keychain | your Anthropic sign-in, under "wiki-starter" (with Claude only) |
+| Keychain | your Anthropic sign-in and, if you gave one, your TypeSafe key, under "wiki-starter" (with Claude only) |
 
 ## Using it
 
@@ -78,28 +108,35 @@ If anything fails, run the same line again. Finished steps are skipped.
 - **Review** → questions that need your decision wait in the Upload page's **Review**
   tab, each with answers to choose from. Every **Needs review** label links to its
   question. The *Review queue* page keeps the full record.
-- **Auto-review (optional, Claude only)** → save a TypeSafe API key in **Settings** (top
-  right of the Upload page). Jev, TypeSafe's decision model, then scores each answer, and
-  in Auto-review applies its answer when the documents settle the question and its
-  confidence reaches your bar (70% to start). Questions that need your own knowledge or
-  decision always wait for you. TypeSafe charges per token of
-  the text it is sent: a small fraction of a cent per question.
-- **Settings** → reading speed (batches at once: 1 slowest, 3 moderate, 6 fastest),
-  review mode, the Jev key, title, company name, and batch size, upload limit and
-  spending cap under *Advanced*. They are saved in `wiki.config.json`.
+- **Auto-review (optional, Claude only)** → give the installer a TypeSafe API key, or save
+  one later in **Settings** (top right of the Upload page). Jev, TypeSafe's decision
+  model, then scores each answer, and in Auto-review applies its answer when the
+  documents settle the question and it is at least 70% sure, logging each decision in the
+  Review tab, where you can change it. A key given to the installer turns Auto-review on;
+  switch it in the Review tab. Questions that need your own knowledge or decision always
+  wait for you. TypeSafe charges per token of the text it is sent: a small fraction of a
+  cent per question.
+- **Actions** → when an answer means something must be done outside the wiki, Claude
+  drafts it in the Actions tab with an instruction brief for an AI agent, a member of
+  staff or an outside professional.
+- **Settings** → reading speed (3 to 18 documents at once; the fastest is the default),
+  performance mode (Economical, Moderate, Maximum performance: batch size, largest upload
+  and spending cap per batch), review mode, the Jev key, title and company name. They are
+  saved in `wiki.config.json`; `scripts/wiki_settings.py` has the figures.
 
 ## Costs
 
 - **Model on this Mac:** free. It uses the Mac's memory and power while it reads, and
   frees the memory when it is done.
 - **Subscription:** processing counts against your plan's usage limits. Claude reads up
-  to 3 batches at once, so a large upload uses them up faster, in less time. On a
-  smaller plan, set **Reading speed** to 1 in Settings to read one batch at a time.
+  to 18 documents at once by default, so a large upload uses them up faster, in less
+  time. On a smaller plan, lower **Reading speed** in Settings.
 - **API key:** you pay per use. A typical document costs cents; a long scanned contract
-  can cost more. Documents are read in batches of 8, and each batch is capped (default
-  US$5, `maxSpendPerBatchUsd` in `wiki.config.json`), so a large upload costs in
-  proportion to its size. Reading batches side by side changes the speed, not the total.
-  A file that fails twice is set aside instead of retried.
+  can cost more. Each batch has a spending cap set by the performance mode (US$2, US$5
+  or US$25 per batch), so a large upload costs in proportion to its size; documents a
+  batch did not reach are read in another run that starts right away. Reading documents
+  side by side changes the speed, not the total. A file that fails twice is set aside
+  instead of retried.
 - Everything else is free.
 
 ## Privacy
@@ -112,8 +149,8 @@ If anything fails, run the same line again. Finished steps are skipped.
 - With Claude, the text Claude reads while working is sent to Anthropic to be processed.
   With the model on this Mac, nothing leaves the Mac: Claude is never started and no
   Anthropic account is used.
-- Auto-review is off until you save a TypeSafe API key in Settings, and is never used with
-  the model on this Mac. With a key, each review question, its answers, and the parts of
+- Jev is off until a TypeSafe API key is saved, by the installer or in Settings, and is
+  never used with the model on this Mac. With a key, each review question, its answers, and the parts of
   the wiki and the document it is about are sent to TypeSafe to be scored; nothing else.
   The key is kept in the Keychain, not in a file.
 - Source documents are not kept in the wiki's git history. **Turn on Time Machine.**
@@ -189,12 +226,13 @@ for a in ~/Library/LaunchAgents/local.wiki-starter.*.plist; do
 done
 ```
 
-Then remove the Anthropic sign-in, the model on this Mac (if it was downloaded), llama.cpp
-and the Desktop shortcuts:
+Then remove the Anthropic sign-in, the TypeSafe key, the model on this Mac (if it was
+downloaded), llama.cpp and the Desktop shortcuts:
 
 ```sh
 security delete-generic-password -s wiki-starter -a claude-oauth-token 2>/dev/null
 security delete-generic-password -s wiki-starter -a anthropic-api-key 2>/dev/null
+security delete-generic-password -s wiki-starter -a typesafe-api-key 2>/dev/null
 rm -rf ~/Library/"Application Support"/wiki-starter
 brew uninstall llama.cpp 2>/dev/null
 rm -f ~/Desktop/"Open Wiki.webloc" ~/Desktop/"Wiki Inbox" ~/Desktop/"Wiki Intake"

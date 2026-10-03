@@ -2,6 +2,60 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Big uploads that keep moving, performance modes, and actions
+- **Drop anything, I'll build the wiki.** The Upload page's box has no buttons any more:
+  it lights up under the pointer, a click opens the file picker, and while files are
+  dragged over the window the whole box glows. Folders: drop them, or use the small
+  *Choose a folder* link.
+- **Large uploads start in seconds.** With thousands of files, a run used to spend many
+  minutes on bookkeeping before reading the first one, while the page said "Letting the
+  files settle". It no longer waits for a browser upload to finish (only for files still
+  being copied, at most a minute), handles the whole list in one go, and says when it is
+  getting the files ready. In our test with 2,000 files the first document was being
+  converted within seconds instead of after almost 2 minutes, and the whole run took
+  half as long.
+- **Runs that cannot get stuck.**
+  - A file that crashes the document converter ("Python quit unexpectedly") or hangs it
+    is marked and set aside after two tries; the files after it are converted as usual.
+  - If the reader itself crashes, only the documents it was reading count a try, and the
+    next run reads them one at a time so only the one at fault is set aside. You are no
+    longer told to check your Anthropic sign-in when that is not the problem.
+  - Documents Claude cannot read no longer stop every run when they come first: each
+    counts a try and is set aside after two, and the rest are read.
+  - A run that ended without tidying up (the Mac restarted, or it was stopped by force)
+    no longer blocks every run after it, and the Upload page says it stopped.
+  - If a run makes no progress for 15 minutes, the Upload page offers **Restart
+    processing**: what is filed stays filed, and the rest is read again.
+  - The Mac stays awake while a run is reading, and an upload rides out the wiki
+    restarting: it pauses and carries on by itself.
+  - Documents a batch did not reach because of its spending cap no longer count as
+    failed tries; they are read in the next run, which starts straight away.
+- **Reading speed starts at the fastest.** Claude reads 18 documents at once by default
+  (Settings: 3 to 18). Speed changes how soon an upload is done, not what it costs: each
+  document costs the same.
+- **Performance modes** replace the batch size, upload limit and spending cap fields:
+  Economical (20 documents per batch, files up to 100 MB, US$2 cap per batch), Moderate
+  (40, 500 MB, US$5) and Maximum performance (100, 2 GB, US$25, the default). Bigger
+  batches pause less often, so a large upload finishes sooner. A wiki that had its own
+  figures keeps them, shown as Custom, until you choose a mode.
+- **Review tab:** each question links to its document wherever it has been filed (before,
+  the link of a document filed after its question was asked led to a "page not found"),
+  and a question about a picture shows the picture. In Auto-review, Jev's decisions are
+  logged with how it scored every answer, and **Change this answer** opens an answered
+  question again for you (except one about a file that could not be read: that answer moved
+  the file); Jev never answers a question you reopened. The confidence slider is gone:
+  Jev answers when it is at least 70% sure.
+- **Actions tab:** when an answer means something must be done outside the wiki (a return
+  to correct, an amount to chase, a licence to renew), Claude drafts it with an instruction
+  brief for an AI agent with a browser (which prepares everything and stops to ask you
+  before submitting or paying anything), a member of your staff, or an outside
+  professional. Choose who does it, copy or download the brief, mark it done.
+- **The installer sets up Jev:** with Claude, it asks for a TypeSafe API key (Enter skips),
+  checks it, keeps it in the Keychain and turns Auto-review on.
+- The live line has many more words for each step, still saying exactly what is happening.
+- To run the background processing as an ordinary (not low-priority) job on an Apple
+  silicon Mac, paste the install line again once; your wiki stays as it is.
+
 ## Fast reading for large uploads
 - **Fast reading is now how Claude reads.** Claude reads many documents at once, one
   question each (with Claude Sonnet), and the wiki engine

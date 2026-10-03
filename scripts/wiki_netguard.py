@@ -24,6 +24,7 @@ import ipaddress
 import os
 import socket
 import sys
+import threading
 import traceback
 
 LOG_FILE = os.path.join(
@@ -33,7 +34,8 @@ LOG_FILE = os.path.join(
 _installed = False
 _reported = set()
 _own_names = set()
-_busy = False
+_busy = threading.local()   # per thread: the guard's own work is not checked again,
+                            # while another thread's socket calls still are
 
 
 def _host_names():
@@ -102,10 +104,9 @@ def _refuse(what, target, exc):
 
 
 def _hook(event, args):
-    global _busy
-    if not event.startswith("socket.") or _busy:
+    if not event.startswith("socket.") or getattr(_busy, "on", False):
         return
-    _busy = True
+    _busy.on = True
     try:
         if event == "socket.gethostbyaddr":
             _refuse("a reverse lookup of", args[0],
@@ -124,7 +125,7 @@ def _hook(event, args):
                 _refuse("a connection to", addr[0],
                         OSError(errno.EHOSTUNREACH, "refused: the wiki never connects to the local network"))
     finally:
-        _busy = False
+        _busy.on = False
 
 
 def install():

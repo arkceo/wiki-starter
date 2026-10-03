@@ -16,7 +16,13 @@ when a TypeSafe key is set (scripts/wiki_jev.py). An answer is applied like this
     for the reader), set it aside for good (raw/_set-aside/, never read, nothing deleted),
     or leave it where it is;
   - anything else: an Update Packet in raw/inbox/ carrying the decision, which the next
-    run applies to the pages concerned, like any packet.
+    run applies to the pages concerned, like any packet. When the decision means someone
+    must do something outside the wiki, the Claude session applying the packet also writes
+    a suggested action (scripts/wiki_actions.py).
+
+An answer can be changed: `reopen` moves an answered item back to review/open/ with the
+earlier answer kept as "previous", and the new answer's packet says what it replaces. An
+answer about a file that could not be read moved the file, so it cannot be reopened.
 
 An item:
   {"id": "RV-20261003-supplier-terms", "created": "2026-10-03",
@@ -26,7 +32,20 @@ An item:
    "pages": ["wiki/companies/acme.md"],          pages the answer changes
    "options": [{"key": "A", "label": "...", "effect": "..."}, ...],
    "recommended": "A",                           the writer's own pick, if any
-   "jev": {...}, "answer": {...}}                added by scoring and answering
+   "jev": {...}, "answer": {...},                added by scoring and answering
+   "fileWas": "raw/_intake/contract.pdf",        where "file" was before the document was filed
+   "previous": {...}, "reopened": "<time>"}      the earlier answer of a reopened item, which
+                                                 auto-review then leaves to the owner
+
+Where the document is now. An item is often written while its document still waits in
+raw/_intake/, and the document is filed into raw/<project>/ afterwards, so "file" goes
+stale. Two things keep the Review tab's links working: whoever files a document calls
+`relocate` (the engine's fast reading, and Claude's stream for classic reading), and the
+listings add "fileNow" (where the file is now, found by its name if it moved without a
+relocate) and "page" (the wiki/sources/ page citing it). Both are worked out, never stored.
+
+Item files change in three processes (the viewer, the runner, the follower of Claude's
+stream), so every change takes a lock shared between processes (`changing`).
 
 Usage (the runner):
   wiki_review.py park --file raw/_intake/x.jpg --to raw/_needs-review/x.jpg --attempts 2 --engine claude
@@ -36,7 +55,9 @@ Usage (the runner):
 Standard library only.
 """
 import argparse
+import contextlib
 import datetime
+import fcntl
 import json
 import os
 import re
@@ -51,7 +72,10 @@ import wiki_events  # noqa: E402
 OPEN = os.path.join(WIKI_DIR, "review", "open")
 DONE = os.path.join(WIKI_DIR, "review", "done")
 NOTES = os.path.join(WIKI_DIR, ".wiki-engine", "state", "review-notes.json")
+LOCK_FILE = os.path.join(WIKI_DIR, ".wiki-engine", "state", "review.lock")
 ID_RE = re.compile(r"^RV-[A-Za-z0-9][A-Za-z0-9-]{0,95}$")
+# Fields worked out for the Upload page by the listings, never written to an item file.
+DERIVED = ("fileNow", "page")
 KINDS = ("contradiction", "uncertain", "missing", "unreadable")
 KEYS = "ABCDEFGH"
 # The converter's words (scripts/to_markdown.py), as the owner would say them.
@@ -62,6 +86,29 @@ NOTES_SAID = {"image-little-text": "OCR found little or no text", "image-no-ocr"
               "scanned-no-ocr": "a scan, and no OCR on this Mac",
               "heic-not-converted": "an iPhone photo that could not be converted"}
 LOCK = threading.Lock()   # one answer at a time in this process
+
+
+@contextlib.contextmanager
+def changing(lock_file=LOCK_FILE, thread_lock=LOCK):
+    """One change to the item files at a time: across this process's threads, and across
+    the processes that change them. Without the shared lock file (a folder that cannot
+    be written), the thread lock alone still holds."""
+    with thread_lock:
+        f = None
+        try:
+            os.makedirs(os.path.dirname(lock_file), exist_ok=True)
+            f = open(lock_file, "a")
+            fcntl.flock(f, fcntl.LOCK_EX)
+        except OSError:
+            if f:
+                f.close()
+            f = None
+        try:
+            yield
+        finally:
+            if f:
+                fcntl.flock(f, fcntl.LOCK_UN)
+                f.close()
 
 
 def today():
@@ -141,11 +188,32 @@ def normalise(raw, name):
     for k in ("queued", "facts"):
         if isinstance(raw.get(k), (str, dict)):
             item[k] = raw[k]
+    for k, n in (("fileWas", 500), ("reopened", 40)):
+        if isinstance(raw.get(k), str) and raw[k]:
+            item[k] = raw[k][:n]
     if isinstance(raw.get("jev"), dict):
         item["jev"] = raw["jev"]
     if isinstance(raw.get("answer"), dict):
         item["answer"] = raw["answer"]
+    prev = earlier_answer(raw.get("previous"))
+    if prev:
+        item["previous"] = prev
     return item
+
+
+def earlier_answer(prev):
+    """The earlier answer of a reopened item, checked: it ends up in a packet."""
+    if not isinstance(prev, dict) or not (clip(prev.get("label"), 200) or clip(prev.get("text"), 1500)):
+        return None
+    out = {"key": str(prev.get("key") or "").strip().upper()[:2], "label": clip(prev.get("label"), 200),
+           "text": clip(prev.get("text"), 1500), "by": "jev" if prev.get("by") == "jev" else "owner",
+           "at": str(prev.get("at") or "")[:40]}
+    if isinstance(prev.get("jev"), dict):
+        out["jev"] = prev["jev"]
+    packet = prev.get("packet")
+    if isinstance(packet, str) and packet.startswith("raw/inbox/") and ".." not in packet.split("/"):
+        out["packet"] = packet[:500]
+    return out
 
 
 def load(folder, name):
@@ -156,9 +224,9 @@ def load(folder, name):
         return None
 
 
-def list_open():
+def list_open(places=True):
     """Open items, oldest first. A file being written, or one that is not a valid item,
-    is left out (and stays where it is)."""
+    is left out (and stays where it is). places: add "fileNow" and "page"."""
     out = []
     try:
         names = sorted(n for n in os.listdir(OPEN) if n.endswith(".json"))
@@ -169,16 +237,32 @@ def list_open():
         if item:
             out.append(item)
     out.sort(key=lambda i: (i["created"], i["id"]))
-    return out
+    return add_places(out) if places else out
 
 
-def list_done(limit=40):
+def mtime(path):
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return 0.0   # answered or moved meanwhile
+
+
+def list_done(limit=40, places=True):
+    """Answered items, newest first."""
     try:
         names = [n for n in os.listdir(DONE) if n.endswith(".json")]
     except OSError:
         return []
-    names.sort(key=lambda n: os.path.getmtime(os.path.join(DONE, n)), reverse=True)
-    return [i for i in (load(DONE, n) for n in names[:limit]) if i]
+    names.sort(key=lambda n: mtime(os.path.join(DONE, n)), reverse=True)
+    out = [i for i in (load(DONE, n) for n in names[:limit]) if i]
+    return add_places(out) if places else out
+
+
+def count_done():
+    try:
+        return sum(1 for n in os.listdir(DONE) if n.endswith(".json"))
+    except OSError:
+        return 0
 
 
 def get_open(iid):
@@ -188,11 +272,205 @@ def get_open(iid):
 
 
 def save_open(item):
-    """Rewrite an open item (scores added). Never brings back one answered meanwhile."""
+    """Add Jev's scores to an open item. Never brings back one answered meanwhile, and
+    keeps whatever changed in it while Jev was scoring (a reopen, a relocate): only the
+    scores are written into the file as it is now."""
     path = os.path.join(OPEN, item["id"] + ".json")
-    with LOCK:   # an answer moves the file out under the same lock
-        if os.path.exists(path):
-            write_json(path, item)
+    with changing():   # an answer moves the file out under the same lock
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+        except (OSError, ValueError):
+            return   # answered meanwhile, or being written
+        if isinstance(raw, dict) and isinstance(item.get("jev"), dict):
+            raw["jev"] = item["jev"]
+            write_json(path, raw)
+
+
+# ----------------------------------------------------- where documents are now -------
+def relocate(old, new):
+    """A document was filed from `old` to `new` (paths relative to the wiki): every item
+    about it, open or answered, now says `new`, and keeps `old` as "fileWas". Returns the
+    number of items changed."""
+    if not old or not new or old == new:
+        return 0
+    changed = 0
+    with changing():
+        for folder in (OPEN, DONE):
+            try:
+                names = [n for n in os.listdir(folder) if n.endswith(".json") and ID_RE.match(n[:-5])]
+            except OSError:
+                continue
+            for n in names:
+                path = os.path.join(folder, n)
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        raw = json.load(f)
+                except (OSError, ValueError):
+                    continue   # being written, or not an item: left alone
+                if not isinstance(raw, dict) or raw.get("file") != old:
+                    continue
+                raw["file"], raw["fileWas"] = new, old
+                try:
+                    write_json(path, raw)
+                except OSError as e:   # the document is filed either way; listings still find it
+                    wiki_events.log(f"review item {n} not updated: {e}")
+                    continue
+                changed += 1
+    return changed
+
+
+def raw_index():
+    """Every file under raw/ by its name: {name: [(path, mtime), ...]}. raw/inbox/ holds
+    packets, never documents; hidden files and links are left out."""
+    index = {}
+    base = os.path.join(WIKI_DIR, "raw")
+    for dirpath, dirs, files in os.walk(base):
+        rel_dir = os.path.relpath(dirpath, WIKI_DIR).replace(os.sep, "/")
+        dirs[:] = [d for d in dirs if not d.startswith(".") and f"{rel_dir}/{d}" != "raw/inbox"]
+        for fn in files:
+            full = os.path.join(dirpath, fn)
+            if fn.startswith(".") or os.path.islink(full):
+                continue
+            index.setdefault(fn, []).append((f"{rel_dir}/{fn}", mtime(full)))
+    return index
+
+
+def safe_raw_path(path):
+    """path if it names a regular file inside raw/ (a link out of it does not count)."""
+    if not isinstance(path, str) or not path.startswith("raw/") or "\x00" in path or "\\" in path:
+        return ""
+    if any(p in ("", ".", "..") for p in path.split("/")):
+        return ""
+    full = os.path.join(WIKI_DIR, *path.split("/"))
+    real, base = os.path.realpath(full), os.path.realpath(os.path.join(WIKI_DIR, "raw"))
+    return path if real.startswith(base + os.sep) and os.path.isfile(real) else ""
+
+
+def resolve_file(path, index):
+    """Where an item's document is now: its own path if the file is there; else the one
+    file under raw/ with the same name (of several: one already filed, outside raw/_intake/
+    and raw/_needs-review/, then the newest); "" if none. index: raw_index(), or a
+    callable returning it (built only when a file has moved)."""
+    here = safe_raw_path(path)
+    if here or not isinstance(path, str):
+        return here
+    name = path.replace("\\", "/").rsplit("/", 1)[-1]
+    if not name or name.startswith(".") or "\x00" in name:
+        return ""
+    if callable(index):
+        index = index()
+    found = (index or {}).get(name) or []
+    if not found:
+        return ""
+    queued = ("raw/_intake/", "raw/_needs-review/")
+    return max(found, key=lambda pm: (not pm[0].startswith(queued), pm[1], pm[0]))[0]
+
+
+_SOURCES_CACHE = {}   # page path -> (mtime_ns, size, sources): pages are re-read only when they change
+_LIST_ITEM_RE = re.compile(r'"((?:[^"\\]|\\.)*)"|\'((?:[^\']|\'\')*)\'|([^,\s][^,]*)')
+
+
+def _scalar(token):
+    token = token.strip()
+    if len(token) >= 2 and token[0] == token[-1] == '"':
+        try:
+            return json.loads(token)
+        except ValueError:
+            return token[1:-1]
+    if len(token) >= 2 and token[0] == token[-1] == "'":
+        return token[1:-1].replace("''", "'")
+    return token
+
+
+def page_sources(text):
+    """The `sources:` list of a page's frontmatter, inline ([a, "b"]) or one item a line."""
+    if not text.startswith("---"):
+        return []
+    end = text.find("\n---", 3)
+    lines = text[3:end if end > 0 else len(text)].splitlines()
+    for i, line in enumerate(lines):
+        if not line.startswith("sources:"):
+            continue
+        rest = line[len("sources:"):].strip()
+        if rest.startswith("["):
+            inner = rest[1:rest.rfind("]")] if "]" in rest else rest[1:]
+            out = []
+            for m in _LIST_ITEM_RE.finditer(inner):
+                if m.group(1) is not None:
+                    out.append(_scalar('"' + m.group(1) + '"'))
+                elif m.group(2) is not None:
+                    out.append(m.group(2).replace("''", "'"))
+                elif m.group(3).strip():
+                    out.append(m.group(3).strip())
+            return out
+        if rest:
+            return [_scalar(rest)]
+        out = []
+        for nxt in lines[i + 1:]:
+            s = nxt.strip()
+            if not s.startswith("- "):
+                if s:
+                    break
+                continue
+            out.append(_scalar(s[2:]))
+        return out
+    return []
+
+
+def sources_index():
+    """{document path: [pages citing it in their `sources:`]} over wiki/sources/*.md."""
+    folder = os.path.join(WIKI_DIR, "wiki", "sources")
+    index, seen = {}, set()
+    try:
+        names = sorted(n for n in os.listdir(folder) if n.endswith(".md") and not n.startswith("."))
+    except OSError:
+        names = []
+    for n in names:
+        full = os.path.join(folder, n)
+        try:
+            st = os.lstat(full)
+        except OSError:
+            continue
+        if not os.path.isfile(full) or os.path.islink(full):
+            continue
+        page = "wiki/sources/" + n
+        seen.add(page)
+        hit = _SOURCES_CACHE.get(page)
+        if not hit or hit[:2] != (st.st_mtime_ns, st.st_size):
+            try:
+                with open(full, encoding="utf-8", errors="replace") as f:
+                    head = f.read(16384)
+            except OSError:
+                continue
+            hit = (st.st_mtime_ns, st.st_size, page_sources(head))
+            _SOURCES_CACHE[page] = hit
+        for src in hit[2]:
+            if isinstance(src, str) and src:
+                index.setdefault(src.strip(), []).append((len(hit[2]), page))
+    for page in [p for p in list(_SOURCES_CACHE) if p not in seen]:
+        _SOURCES_CACHE.pop(page, None)
+    # Of several pages citing a document, its own summary (the fewest sources) comes first.
+    return {src: min(pages)[1] for src, pages in index.items()}
+
+
+def add_places(items):
+    """Add "fileNow" and "page" to listed items; raw/ and wiki/sources/ are read at most
+    once for the whole listing."""
+    raw = {}
+
+    def lazy_raw():
+        if "index" not in raw:
+            raw["index"] = raw_index()
+        return raw["index"]
+
+    pages = None
+    for it in items:
+        it["fileNow"] = resolve_file(it.get("file") or "", lazy_raw)
+        if it["fileNow"] and pages is None:
+            pages = sources_index()
+        it["page"] = (pages or {}).get(it["fileNow"], "") if it["fileNow"] else ""
+    return items
 
 
 def revision():
@@ -386,7 +664,8 @@ def decided_by(by, jev):
 
 
 def write_packet(item, option, text, by):
-    """The decision as an Update Packet in raw/inbox/; returns its path."""
+    """The decision as an Update Packet in raw/inbox/; returns its path. For a reopened
+    item it also says which earlier answer this one replaces."""
     q = item["question"]
     pages = ", ".join(item["pages"]) or "the pages named in the review entry"
     if option:
@@ -395,6 +674,15 @@ def write_packet(item, option, text, by):
         answer = "(in the owner's words) " + clip(text, 1500)
     if option and text:
         answer += " The owner added: " + clip(text, 1500)
+    prev = item.get("previous") if isinstance(item.get("previous"), dict) else None
+    replaces = supersedes = ""
+    if prev:
+        said = prev.get("label") or prev.get("text") or "an earlier answer"
+        when = str(prev.get("at") or "")[:10]
+        who = decided_by(prev.get("by"), prev.get("jev"))
+        replaces = f"{clip(said, 400)} (decided by {who}{', ' + when if when else ''})"
+        supersedes = (f"the earlier answer to this question, \"{clip(said, 300)}\" (decided by {who}"
+                      f"{', ' + when if when else ''}), and whatever the pages say because of it")
     lines = [
         f"## [{today()}] update | general | Review answer: {clip(q, 90)}",
         "**Type:** decision",
@@ -407,19 +695,25 @@ def write_packet(item, option, text, by):
         f"- Answer: {clip(answer, 1800)}",
         f"- Decided by: {decided_by(by, item.get('jev'))}",
     ]
+    if replaces:
+        lines.append(f"- This replaces the earlier answer: {replaces}")
     if item.get("context"):
         lines.append(f"- Context: {clip(item['context'], 1500)}")
-    if item.get("file"):
-        lines.append(f"- Source document: {item['file']}")
+    if item.get("file"):   # where it is now, if it was filed after the item was written
+        lines.append(f"- Source document: {clip(resolve_file(item['file'], raw_index) or item['file'], 500)}")
     lines += [
         "- Apply the answer to the pages above, and add a line under the matching "
-        "wiki/_review.md entry saying it was resolved, with the answer and the date.",
-        "**Supersedes:** whatever those pages said that this answer replaces",
+        "wiki/_review.md entry saying it was resolved, with the answer and the date."
+        + (" Undo what the earlier answer changed where this one differs." if replaces else ""),
+        f"**Supersedes:** {supersedes or 'whatever those pages said that this answer replaces'}",
         "**Open questions:** none",
         "",
     ]
     os.makedirs(os.path.join(WIKI_DIR, "raw", "inbox"), exist_ok=True)
-    name = f"update-{today()}-review-{slug(item['id'][3:], 60)}.md"
+    # The time in the name keeps packets in the order they were decided: a changed answer
+    # sorts after the one it replaces (packets are applied oldest name first), and never
+    # takes the name of a packet already archived.
+    name = f"update-{today()}-{datetime.datetime.now():%H%M%S%f}-review-{slug(item['id'][3:], 50)}.md"
     tmp = os.path.join(WIKI_DIR, ".wiki-engine", "state", "uploads", f".review-{secrets.token_hex(6)}.part")
     os.makedirs(os.path.dirname(tmp), exist_ok=True)
     with open(tmp, "w", encoding="utf-8") as f:
@@ -432,10 +726,12 @@ def answer(iid, key="", text="", by="owner"):
     something new to do)."""
     text = str(text or "").strip()
     key = str(key or "").strip().upper()
-    with LOCK:
+    with changing():
         item = get_open(iid)
         if not item:
             return {"ok": False, "message": "That review item is no longer open."}
+        if by == "jev" and (item.get("reopened") or item.get("previous")):
+            return {"ok": False, "message": "The owner opened that question again to answer it."}
         option = next((o for o in item["options"] if o["key"] == key), None)
         if key and not option:
             return {"ok": False, "message": "That answer is not one of the options."}
@@ -453,6 +749,7 @@ def answer(iid, key="", text="", by="owner"):
                 if not (back.startswith("raw/_intake/") and ".." not in back.split("/")):
                     back = "raw/_intake/" + os.path.basename(src)
                 dest = wiki_rel(place(os.path.join(WIKI_DIR, src), os.path.join(WIKI_DIR, back)))
+                item["fileWas"], item["file"] = src, dest   # its link follows it (and relocate, later)
                 if text:
                     add_note(dest, text)
                 queued = True
@@ -461,6 +758,7 @@ def answer(iid, key="", text="", by="owner"):
             elif action == "setaside":
                 dest = wiki_rel(place(os.path.join(WIKI_DIR, src),
                                       os.path.join(WIKI_DIR, "raw", "_set-aside", os.path.basename(src))))
+                item["fileWas"], item["file"] = src, dest
                 message = f"{os.path.basename(src)} was set aside in {os.path.dirname(dest)}/."
             else:
                 message = f"{os.path.basename(src)} stays in Needs review."
@@ -468,10 +766,14 @@ def answer(iid, key="", text="", by="owner"):
             packet = wiki_rel(write_packet(item, option, text, by))
             queued = True
             message = "The answer goes into the wiki on the next run."
+            if item.get("previous"):
+                message += withdraw_earlier(item)
             wiki_events.emit("upload", file=packet, name=os.path.basename(packet), queue="inbox",
                              bytes=os.path.getsize(os.path.join(WIKI_DIR, packet)), via="review")
         item["answer"] = {"key": option["key"] if option else "", "label": option["label"] if option else "",
                           "text": clip(text, 1500), "by": by, "at": stamp()}
+        if item["kind"] != "unreadable":
+            item["answer"]["packet"] = packet
         item["status"] = "answered"
         write_json(os.path.join(DONE, item["id"] + ".json"), item)
         try:
@@ -479,9 +781,74 @@ def answer(iid, key="", text="", by="owner"):
         except OSError:
             pass
         conf = (item.get("jev") or {}).get("confidence") if by == "jev" else None
-        wiki_events.emit("review-answered", id=item["id"], file=item["file"], by=by,
-                         answer=item["answer"]["label"] or clip(text, 120), confidence=conf)
+        wiki_events.emit("review-answered", id=item["id"], file=item.get("fileWas") or item["file"], by=by,
+                         answer=item["answer"]["label"] or clip(text, 120), confidence=conf,
+                         replaces=True if item.get("previous") else None)
         return {"ok": True, "message": message, "queued": queued}
+
+
+def withdraw_earlier(item):
+    """A changed answer: the earlier answer's packet is taken back if it has not been
+    applied yet (it would only be undone), and the suggested actions drafted from the
+    earlier answer are dismissed (nothing is deleted; they move to actions/done/).
+    Returns a few words for the owner, or "". Called under the review lock."""
+    said = []
+    prev = item.get("previous") or {}
+    packet = prev.get("packet") if isinstance(prev.get("packet"), str) else ""
+    full = os.path.join(WIKI_DIR, *packet.split("/")) if packet.startswith("raw/inbox/") else ""
+    if full and inside(packet, "raw/inbox") and os.path.isfile(full):
+        try:
+            os.unlink(full)
+            said.append("the earlier answer was taken back before it was applied")
+            wiki_events.emit("routed", file=packet, to="", msg="the answer it carried was changed")
+        except OSError:
+            pass
+    try:
+        import wiki_actions   # imports this module: imported here, when needed
+        n = wiki_actions.dismiss_from(item["id"], "the review answer it came from was changed")
+    except Exception as e:   # never lose an answer over its actions
+        wiki_events.log(f"actions from {item['id']} not dismissed: {e}")
+        n = 0
+    if n:
+        said.append(f"{n} action{'' if n == 1 else 's'} drafted from it {'was' if n == 1 else 'were'} dismissed")
+    return (" " + "; ".join(said).capitalize() + ".") if said else ""
+
+
+def reopen(iid):
+    """Move an answered item back to review/open/ so the owner can change the answer.
+    The earlier answer (with Jev's scores) is kept as "previous"; the next answer's packet
+    says it replaces it. Returns {"ok", "message"}."""
+    if not ID_RE.match(iid or ""):
+        return {"ok": False, "message": "That review item was not found."}
+    with changing():
+        item = load(DONE, iid + ".json")
+        if not item:
+            return {"ok": False, "message": "That review item was not found among the answered ones."}
+        if os.path.exists(os.path.join(OPEN, iid + ".json")):
+            return {"ok": False, "message": "That review item is already open."}
+        if item["kind"] == "unreadable":
+            return {"ok": False, "message": "That answer moved the file (back into the queue, or set aside), "
+                                            "so it cannot be changed here. The file's own question comes back "
+                                            "if it still cannot be read."}
+        old = item.pop("answer", None)
+        if not isinstance(old, dict):
+            return {"ok": False, "message": "That review item has no answer to change."}
+        prev = earlier_answer(dict(old, jev=item.get("jev")) if isinstance(item.get("jev"), dict) else old)
+        if prev:
+            item["previous"] = prev
+        item.pop("status", None)
+        # Jev's scores stay, so the question is not sent again; a reopened item is never
+        # answered automatically (scripts/wiki_jev.py): the owner reopened it to decide.
+        item["reopened"] = stamp()
+        write_json(os.path.join(OPEN, iid + ".json"), item)
+        try:
+            os.unlink(os.path.join(DONE, iid + ".json"))
+        except OSError:
+            pass
+        wiki_events.emit("review-reopened", id=iid, file=item["file"],
+                         answer=(prev or {}).get("label") or clip((prev or {}).get("text"), 120))
+        return {"ok": True, "message": "The question is open again: choose the new answer. "
+                                       "It replaces the earlier one on the next run."}
 
 
 # -------------------------------------------------------------------- cli -------

@@ -54,6 +54,21 @@ Usage:
                                        runner calls this), no Update Packets
   local_engine.py run --packets        only the Update Packets
   local_engine.py check                start the model and ask one question (installer)
+  run --packet-list FILE  with --packets: only the packets listed in FILE (those that had
+                        finished arriving when the run began; the runner calls this)
+  run --tried FILE      at the end of the reading, write the documents it tried (all it was
+                        given but those a spending cap left unread, which must not count a try)
+  run --capped FILE     at the end of the reading, write the documents a spending cap left
+                        unread (never put to Claude); the runner counts a try for every
+                        other document of the batch, so one this script never saw is set
+                        aside in the end instead of being read again and again
+  run --inflight FILE   keep the files being read right now in FILE, so that if this process
+                        dies (a native crash) the runner knows which ones to count a try for
+  run --alone FILE      with Claude reading: read the documents listed in FILE first, one at
+                        a time (they were being read when it died the run before)
+  run --why FILE        when it exits 2, the reason (a sign-in, a usage limit, ...) in FILE
+  Lists (--docs, --alone, --packet-list) hold one path per line, exactly: a name may end
+  in a space. Folders whose name starts with a dot are skipped, as the runner skips them.
 
 Exit status: 0 all done; 1 some files failed (they stay queued and are retried, then set
 aside, like any file); 2 the model could not run at all (nothing is counted against the
@@ -77,6 +92,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -91,6 +107,7 @@ import wiki_claude  # noqa: E402
 import wiki_review  # noqa: E402
 import wiki_events  # noqa: E402
 import wiki_netguard  # noqa: E402
+import wiki_settings  # noqa: E402
 from local_pages import clean_line, esc, label, owner_text, raw_link, yq  # noqa: E402,F401
 
 CHUNK_CHARS = 18000          # about 5-6k tokens: leaves room for instructions and the answer
@@ -874,6 +891,28 @@ class Run:
     cap = 0.0         # the fast pipeline's spending cap for one batch (maxSpendPerBatchUsd)
     doc_budget = DOC_BUDGET_SECONDS
     prose_budget = PROSE_BUDGET_SECONDS
+    capped = set()    # documents never put to Claude because the batch reached its cap
+    alone = set()     # documents to read first, one at a time (--alone)
+    inflight = set()  # files being read right now ...
+    inflight_path = ""  # ... kept in this file for the runner (--inflight)
+    inflight_lock = threading.Lock()
+    why_path = ""     # why the model or Claude could not run, for the runner (--why)
+
+
+def in_flight(src, on):
+    """Note that a file is being read (on) or done with (off). The runner reads the list if
+    this process dies, to count a try for those files only."""
+    if not Run.inflight_path:
+        return
+    with Run.inflight_lock:
+        (Run.inflight.add if on else Run.inflight.discard)(src)
+        tmp = f"{Run.inflight_path}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write("".join(p + "\n" for p in sorted(Run.inflight)))
+            os.replace(tmp, Run.inflight_path)
+        except OSError:
+            pass
 
 
 def say(phase, detail="", **fields):
@@ -1386,6 +1425,7 @@ def process_document(model, wiki, claims, src, sysmsg, touched):
     write_document(wiki, claims, src, dest, project, d, plan, truncated, len(parts), touched)
     say("file", f"filing it in {os.path.dirname(dest)}")
     place(src, dest)
+    wiki_review.relocate(src, dest)   # its review items now name where it is
     wiki_events.emit("filed", file=src, to=dest)
     log(f"filed {src} -> {dest}" + (f" ({d['dropped']} figure(s) not in the document left out)" if d["dropped"] else ""))
     log_line("intake", project, d["title"] or name)
@@ -1398,7 +1438,9 @@ def process_document(model, wiki, claims, src, sysmsg, touched):
 # follows the answer is the same as for the model on this Mac: grounding, the claims, the
 # contradictions, the pages and the filing are code.
 CLAUDE_DOC_CHARS = 150000   # about 40k tokens; a longer document is read from its start
-MAX_FAILED_IN_A_ROW = 5     # documents failing one after another: Claude, not the documents
+MAX_FAILED_IN_A_ROW = 5     # documents failing one after another with an API failure that is
+                            # not about the document (wiki_claude.service_failure), nothing
+                            # answered in the run: Claude, not the documents
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp"}
 LOOK_NOTES = {"scanned-no-ocr", "image-no-ocr", "image-little-text", "heic-not-converted"}
 
@@ -1578,6 +1620,7 @@ def claude_document(model, wiki, claims, got, sysmsg, touched):
     write_document(wiki, claims, src, dest, project, d, plan, got.get("truncated"), 1, touched)
     say("file", f"filing it in {os.path.dirname(dest)}")
     place(src, dest)
+    wiki_review.relocate(src, dest)   # its review items now name where it is
     m_src, m_dest = os.path.join(WIKI_DIR, mirror_path(src)), os.path.join(WIKI_DIR, mirror_path(dest))
     if os.path.isfile(m_src) and not os.path.exists(m_dest):   # its text goes with it: no second conversion
         os.makedirs(os.path.dirname(m_dest), exist_ok=True)
@@ -1598,7 +1641,12 @@ def read_with_claude(model, wiki, claims, docs, sysmsg, touched):
     proj_list = projects()
     total = len(docs)
 
-    failed_in_a_row, capped = 0, False
+    # Failures that say the service is failing (no connection, a server error, a sign-in)
+    # stop the run in wiki_claude.Claude.ask: ClaudeUnavailable, no try counted. What
+    # reaches handle() as an exception is a failure about one document, unless its words
+    # are new: service_in_a_row counts the API failures in a row that are not about the
+    # document (wiki_claude.service_failure); answered, whether this run had any answer.
+    service_in_a_row, capped, answered = 0, False, False
 
     def answer(fut):
         """A finished read's answer, or the exception it ended with."""
@@ -1612,24 +1660,35 @@ def read_with_claude(model, wiki, claims, docs, sysmsg, touched):
     def handle(src, got):
         """One document's answer (or the exception its read ended with): checked and
         written. Returns True if Claude was asked."""
-        nonlocal ok, failed_in_a_row, capped
+        nonlocal ok, service_in_a_row, capped, answered
         Run.current = src
         if isinstance(got, Exception):  # one bad file never stops the others ...
             e = got
             ok = False
-            failed_in_a_row += 1
             log(f"{src}: {e}")
             wiki_events.emit("error", file=src, msg=f"{os.path.basename(src)}: {e}")
-            if failed_in_a_row >= MAX_FAILED_IN_A_ROW:
-                # ... but Claude failing document after document is Claude, not the files.
-                raise ModelUnavailable(f"Claude failed {failed_in_a_row} documents in a row; the last: {e}")
+            if str(e).startswith("Claude: ") and wiki_claude.service_failure(str(e)):
+                service_in_a_row += 1
+            else:
+                service_in_a_row = 0
+            if service_in_a_row >= MAX_FAILED_IN_A_ROW and not answered:
+                # ... but the API failing document after document, in a way that is not
+                # about any one document (no status, or a server's), with nothing answered
+                # in this run, is Claude, not the files, in words wiki_claude does not know
+                # yet: the run stops and counts no try. Any other failure counts a try for
+                # its document (after two it is set aside), and the reading goes on: a
+                # queue that starts with documents Claude cannot read (huge scans, a prompt
+                # too long) must not stop every run before the rest.
+                raise ModelUnavailable(f"Claude failed {service_in_a_row} documents in a row; the last: {e}")
             return True
-        if got.get("capped") and not capped:
-            capped = True
-            log(f"stopped at its spending cap (${Run.cap:g}); the documents not read yet wait for the next run")
+        if got.get("capped"):
+            Run.capped.add(src)   # never put to Claude: it must not count a try
+            if not capped:
+                capped = True
+                log(f"stopped at its spending cap (${Run.cap:g}); the documents not read yet wait for the next run")
         asked = "answer" in got
         if asked:
-            failed_in_a_row = 0
+            service_in_a_row, answered = 0, True
         try:
             if not claude_document(model, wiki, claims, got, sysmsg, touched) and not got.get("skip"):
                 ok = False
@@ -1641,27 +1700,36 @@ def read_with_claude(model, wiki, claims, docs, sysmsg, touched):
             wiki_events.emit("error", file=src, msg=f"{os.path.basename(src)}: {e}")
         return asked
 
+    def reading(src):
+        """claude_read in a worker thread, with the document noted as in flight until its
+        answer has been handled."""
+        in_flight(src, True)
+        return claude_read(model, src, sysmsg, listing, titles, proj_list)
+
     # Alone until one document has really been put to Claude: a sign-in that does not work
-    # stops the run after that one call.
-    rest, done = list(docs), 0
-    while rest:
+    # stops the run after that one call. Documents that were being read when this script
+    # died in an earlier run (Run.alone) go first, each alone: if one of them makes it die
+    # again, it alone is to blame, not the documents read beside it.
+    rest, done, asked_any = [d for d in docs if d in Run.alone] + [d for d in docs if d not in Run.alone], 0, False
+    while rest and not (asked_any and rest[0] not in Run.alone):
         src = rest.pop(0)
         done += 1
         Run.current = src
-        say("read", "Claude is reading the first document", n=done, of=total)
+        say("read", "Claude is reading the first document" if not asked_any else
+            "Claude is reading it alone, to be safe", n=done, of=total)
         try:
-            got = claude_read(model, src, sysmsg, listing, titles, proj_list)
+            got = reading(src)
         except ModelUnavailable:
             raise
         except Exception as e:
             got = e
-        if handle(src, got):
-            break
+        asked_any = handle(src, got) or asked_any
+        in_flight(src, False)
     if not rest:
         return ok
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=Run.lanes)
     try:
-        futs = {pool.submit(claude_read, model, src, sysmsg, listing, titles, proj_list): src for src in rest}
+        futs = {pool.submit(reading, src): src for src in rest}
         waiting = set(futs)
         while waiting:
             Run.current = ""
@@ -1671,6 +1739,7 @@ def read_with_claude(model, wiki, claims, docs, sysmsg, touched):
             for fut in finished:
                 done += 1
                 handle(futs[fut], answer(fut))
+                in_flight(futs[fut], False)
     except ModelUnavailable:
         pool.shutdown(wait=False, cancel_futures=True)
         raise
@@ -2708,13 +2777,44 @@ def load_config():
         return {}
 
 
-def run(server=None, only_docs=None, packets_only=False, reader="local"):
+def memory_gb():
+    """This Mac's memory in GB (0 if it cannot be told)."""
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2 ** 30
+    except (ValueError, OSError, AttributeError):
+        pass
+    try:
+        out = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True, timeout=5).stdout
+        return int(out.strip()) / 2 ** 30
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+
+
+def write_list(path, items):
+    if not path:
+        return
+    tmp = f"{path}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("".join(p + "\n" for p in items))
+        os.replace(tmp, path)
+    except OSError as e:
+        log(f"could not write {path}: {e}")
+
+
+def run(server=None, only_docs=None, packets_only=False, reader="local", tried_path="", capped_path="",
+        only_packets=None):
     docs = [] if packets_only else pending("raw/_intake")
     if only_docs is not None:
         docs = [d for d in docs if d in only_docs]
     packets = [] if only_docs is not None else [p for p in pending("raw/inbox") if p.endswith((".md", ".markdown"))]
+    if only_packets is not None:
+        packets = [p for p in packets if p in only_packets]
     if not docs and not packets:
+        write_list(capped_path, [])
+        write_list(tried_path, [])
         return 0
+    docs_given = list(docs)
     config = load_config()
     cfg = config.get("localModel") or {}
     Run.company = clean_line(config.get("company"), 120)
@@ -2724,17 +2824,26 @@ def run(server=None, only_docs=None, packets_only=False, reader="local"):
     Run.reader = reader
     if reader == "claude":
         # The fast pipeline: settings under "fast" in wiki.config.json; by default Claude
-        # reads three documents for every batch the classic path would read at once.
-        fast = config.get("fast") or {}
+        # reads three documents for every batch the classic path would read at once (the
+        # reading speed, parallelBatches: 6 unless the owner chose less, so 18).
+        fast = config.get("fast") if isinstance(config.get("fast"), dict) else {}
+        figures = wiki_settings.effective(config)
         try:
-            Run.lanes = int(fast.get("lanes") or 3 * int(config.get("parallelBatches") or 3))
+            Run.lanes = int(fast.get("lanes") or 3 * figures["parallelBatches"])
         except (TypeError, ValueError):
-            Run.lanes = 9
+            Run.lanes = 3 * figures["parallelBatches"]
         Run.lanes = max(1, min(Run.lanes, 18))
-        # The batch's spending cap, as for a classic batch: no new call starts once Claude's
-        # reported cost reaches it; one call may spend at most the smaller of it and $2.50.
-        cap = config.get("maxSpendPerBatchUsd", config.get("maxSpendPerRunUsd", 5))
-        Run.cap = float(cap) if isinstance(cap, (int, float)) and cap > 0 else 5.0
+        # Each document read at once holds a Claude process and its answer in memory:
+        # about one and a half per GB (an 8 GB Mac reads at most 12 at once).
+        ram = memory_gb()
+        if ram and Run.lanes > max(3, int(1.5 * ram)):
+            log(f"reading {max(3, int(1.5 * ram))} documents at once, not {Run.lanes}: "
+                f"this Mac has {ram:.0f} GB of memory")
+            Run.lanes = max(3, int(1.5 * ram))
+        # The batch's spending cap (the mode's, or the owner's own figure), as for a classic
+        # batch: no new call starts once Claude's reported cost reaches it; one call may
+        # spend at most the smaller of it and $2.50.
+        Run.cap = float(figures["maxSpendPerBatchUsd"])
         chosen = str(fast.get("model") or "sonnet")   # "default": whatever Claude itself defaults to
         model = ClaudeModel({"model": "" if chosen == "default" else chosen, "budget": min(Run.cap, 2.5)})
         if Run.company:
@@ -2756,6 +2865,7 @@ def run(server=None, only_docs=None, packets_only=False, reader="local"):
             docs = []
         for kind, items, fn in (("document", docs, process_document), ("packet", packets, process_packet)):
             for src in items:
+                in_flight(src, True)
                 try:
                     fn(model, wiki, claims, src, sysmsg, touched)
                 except ModelUnavailable:
@@ -2764,7 +2874,11 @@ def run(server=None, only_docs=None, packets_only=False, reader="local"):
                     ok = False
                     log(f"{src}: {e}")
                     wiki_events.emit("error", file=src, msg=f"{os.path.basename(src)}: {e}")
-        # Every file is done; what follows can only improve pages, never fail a file.
+                in_flight(src, False)
+        # Every file is done; what follows can only improve pages, never fail a file. The
+        # runner hears which documents the spending cap left (no try), and which were tried.
+        write_list(capped_path, sorted(Run.capped))
+        write_list(tried_path, [d for d in docs_given if d not in Run.capped] + packets)
         try:
             refresh(model, wiki, claims, sysmsg, touched)
             at_a_glance(wiki, claims)
@@ -2775,6 +2889,7 @@ def run(server=None, only_docs=None, packets_only=False, reader="local"):
     except ModelUnavailable as e:
         log(str(e))
         wiki_events.emit("claude-end", label=label_, ok=False, detail=str(e))
+        write_list(Run.why_path, [str(e)])   # the runner's notice says what it was
         return 2
     finally:
         model.stop()
@@ -2819,17 +2934,44 @@ def main(argv=None):
     ap.add_argument("--packets", action="store_true", help="run: only the Update Packets")
     ap.add_argument("--reader", choices=["local", "claude"], default="local",
                     help="run: who reads the documents; claude is the fast pipeline (scripts/wiki_claude.py)")
+    ap.add_argument("--packet-list", default="", help="run: with --packets, only the packets listed in this file")
+    ap.add_argument("--tried", default="", help="run: write the documents it tried to this file")
+    ap.add_argument("--capped", default="", help="run: write the documents a spending cap left unread to this file")
+    ap.add_argument("--inflight", default="", help="run: keep the files being read right now in this file")
+    ap.add_argument("--alone", default="", help="run: read the documents listed in this file first, one at a time")
+    ap.add_argument("--why", default="", help="run: if the model or Claude cannot run (exit 2), say why in this file")
     a = ap.parse_args(argv)
     wiki_netguard.install()
     os.chdir(WIKI_DIR)
     server = a.server or os.environ.get("WIKI_LOCAL_SERVER_URL")  # tests
     if a.command == "check":
         return check(server)
-    only_docs = None
-    if a.docs:
-        with open(a.docs, encoding="utf-8") as f:
-            only_docs = {line.strip() for line in f if line.strip()}
-    return run(server, only_docs=only_docs, packets_only=a.packets, reader=a.reader)
+
+    def paths_in(path):
+        """The paths listed in a file, one per line, exactly (a name may end in a space)."""
+        with open(path, encoding="utf-8") as f:
+            return {line.rstrip("\n") for line in f if line.rstrip("\n")}
+
+    only_docs = paths_in(a.docs) if a.docs else None
+    only_packets = paths_in(a.packet_list) if a.packet_list else None
+    Run.inflight_path, Run.why_path = a.inflight, a.why
+    write_list(a.inflight, [])
+    if a.alone:
+        try:
+            Run.alone = paths_in(a.alone)
+        except OSError:
+            pass
+    try:
+        return run(server, only_docs=only_docs, packets_only=a.packets, reader=a.reader, tried_path=a.tried,
+                   capped_path=a.capped, only_packets=only_packets)
+    except SystemExit as e:
+        if e.code != 143:
+            raise
+        # Stopped (SIGTERM), its cleanup done: leave now, without waiting for a reading
+        # thread that may be stuck in a call that will never return.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(143)
 
 
 if __name__ == "__main__":

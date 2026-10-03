@@ -18,7 +18,8 @@ or by the runner, and the state is what the wiki and the document say about each
     if the owner had clicked it only when the documents settle the question (SETTLED) and
     Jev's confidence is at least "autoConfidence" (default 0.7). A file the runner set
     aside is the exception: its options are the runner's own and all reversible, so only
-    the confidence counts. Anything else, or an option marked not automatic, waits.
+    the confidence counts. Anything else, an option marked not automatic, or a question
+    the owner reopened to change its answer, waits.
   - Only with Claude: a wiki that reads with the model on this Mac sends nothing anywhere,
     so it never calls Jev.
 
@@ -27,6 +28,7 @@ excerpts of the wiki pages and the document it is about. The key lives in the ma
 Keychain (service "wiki-starter", account "typesafe-api-key"), never in a file.
 
 Usage: wiki_jev.py score     score the open items now (and apply them in auto mode)
+       wiki_jev.py test-key  check the key given on stdin (the installer)
 Standard library only.
 """
 import concurrent.futures
@@ -287,6 +289,8 @@ def settled(item):
 def auto_answer(item, bar):
     """The option auto-review applies, or None."""
     j = item.get("jev") or {}
+    if item.get("reopened") or item.get("previous"):
+        return None   # the owner reopened it to give a different answer
     if "error" in j or float(j.get("confidence") or 0) < bar or not settled(item):
         return None
     opt = next((o for o in item["options"] if o["key"] == j.get("choice")), None)
@@ -332,6 +336,16 @@ def run(force_ids=(), key=None):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["test-key"]:
+        # The installer: the key comes on stdin, never as an argument (ps would show it).
+        # Exit 0: Jev answered; 1: TypeSafe refused the key; 2: it could not be checked now.
+        key = "".join(sys.stdin.read().split())
+        if not key:
+            print("no key given")
+            return 1
+        ok, message = test_key(key)
+        print(message)
+        return 0 if ok else (1 if "did not accept" in message else 2)
     if argv[:1] != ["score"]:
         print(__doc__.strip().splitlines()[-2])
         return 2

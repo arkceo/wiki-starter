@@ -18,6 +18,19 @@ What it does:
   - Output mirrors raw/ structure under the cache dir, one <name>.md per source
   - Idempotent: skips a source whose cache .md is newer than the source (unless --force)
   - Each .md carries frontmatter: source path, sha256 (short), bytes, method, date
+  - Never stuck on one file: the tools it runs (OCR, sips) have time limits, OCR's growing
+    with the page count, and the conversion itself may take --file-seconds per file (15
+    minutes; WIKI_CONVERT_FILE_SECONDS). A file over its limit gets an ERROR mirror ("took
+    too long") and the next file starts. While a tool runs, a "still working" line every
+    minute shows the conversion is alive (the runner stops one that falls silent). A tool's
+    time is measured on a clock that stops while the Mac sleeps, so closing the lid never
+    makes a tool look too slow
+  - Never ended by one file: a mirror that cannot be written (a source name too long for
+    "<name>.md", a full disk) is reported on stderr ("could not write the mirror") and
+    the next file starts
+  - Stopped (SIGTERM, as the runner stops a converter that hangs), it stops the tool it is
+    running with everything that tool started, and removes its temporary files
+  - Folders whose name starts with a dot are skipped, as the runner skips them
 
 Run anywhere (a sandbox, CI, or a Mac). Requirements:
   pip install 'markitdown[all]' pypdf
@@ -31,7 +44,8 @@ Examples:
   python3 scripts/to_markdown.py --ocr off                # skip OCR (digital + Office only)
   python3 scripts/to_markdown.py --list batch.txt         # only the sources named in a file
 """
-import argparse, contextlib, datetime, hashlib, logging, os, re, shutil, subprocess, sys, tempfile
+import argparse, contextlib, datetime, hashlib, logging, os, re, shutil, signal, subprocess, sys, tempfile
+import time
 
 logging.disable(logging.CRITICAL)  # silence pypdf's malformed-xref chatter
 
@@ -40,6 +54,105 @@ SKIP_EXT = {".svg", ".ai", ".crdownload", ".textclipping", ".mp4", ".mov"}
 SCAN_THRESHOLD = 40  # < this many chars on sampled pages => treat the PDF as scanned
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".tif", ".tiff", ".bmp", ".heic", ".heif"}
 HEIC_EXT = {".heic", ".heif"}
+FILE_SECONDS = 900          # converting one file, outside tools apart (--file-seconds)
+OCR_SECONDS = 120           # ocrmypdf: this much, plus OCR_PAGE_SECONDS a page, at most
+OCR_PAGE_SECONDS = 60       #   OCR_MAX_SECONDS: a long scan may take its time, a stuck
+OCR_MAX_SECONDS = 3 * 3600  #   one never holds the queue for ever
+TESSERACT_SECONDS = 300     # one photo, turned one way
+SIPS_SECONDS = 120          # one HEIC photo to JPEG
+HEARTBEAT_SECONDS = 60      # a "still working" line this often while a tool runs
+
+
+class FileTimeout(BaseException):
+    """One file's conversion went over its time limit. A BaseException, so that a
+    library's own `except Exception` cannot swallow it."""
+
+
+def ocr_jobs():
+    """Cores for one OCR: the Mac's, shared among the conversions running side by side
+    (WIKI_CONVERT_JOBS, set by the runner), so that together they do not overload it."""
+    try:
+        side_by_side = max(1, int(os.environ.get("WIKI_CONVERT_JOBS") or 1))
+    except ValueError:
+        side_by_side = 1
+    return max(1, (os.cpu_count() or 1) // side_by_side)
+
+
+def span(seconds):
+    """900 -> "15 min", 3 -> "3 s"."""
+    seconds = int(seconds)
+    return f"{round(seconds / 60)} min" if seconds >= 60 else f"{seconds} s"
+
+
+def _alarm(signum, frame):
+    signal.alarm(30)   # should something swallow this one anyway, it comes back
+    raise FileTimeout()
+
+
+def start_clock(seconds):
+    """Start one file's clock (SIGALRM, where the system has it)."""
+    if seconds > 0 and hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, _alarm)
+        signal.alarm(int(seconds))
+
+
+def stop_clock():
+    if hasattr(signal, "SIGALRM"):
+        signal.alarm(0)
+
+
+_TOOL_PID = None   # the outside tool running now (its own process group), for _on_term
+
+
+def _on_term(signum, frame):
+    """SIGTERM (the runner stopping a converter that hangs): the tool at work goes too, with
+    everything it started (OCR's workers), instead of running on with no parent and no
+    time limit. SystemExit is no Exception: the file's own `finally` still runs and removes
+    its temporary folder."""
+    if _TOOL_PID:
+        try:
+            os.killpg(_TOOL_PID, signal.SIGKILL)
+        except OSError:
+            pass
+    raise SystemExit(128 + signum)
+
+
+def run_tool(cmd, seconds, what, text=False):
+    """Run an outside tool (OCR, a photo conversion) for at most `seconds` and return its
+    CompletedProcess (output captured). The file's own clock stops meanwhile, since the
+    tool has its own limit; every HEARTBEAT_SECONDS a line says it is still at work. A
+    tool over its limit is stopped with everything it started, and raises RuntimeError.
+    The time is the Mac's awake time: a monotonic clock (on a Mac it stops during sleep),
+    and a pass of the loop is never charged more than it waited, should a clock go on
+    while the Mac sleeps."""
+    global _TOOL_PID
+    left = signal.alarm(0) if hasattr(signal, "SIGALRM") else 0
+    took, mark = 0.0, time.monotonic()
+    try:
+        p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             start_new_session=True, text=text, errors="replace" if text else None)
+        _TOOL_PID = p.pid
+        while True:
+            wait = max(1, min(HEARTBEAT_SECONDS, seconds - took))
+            try:
+                out, err = p.communicate(timeout=wait)
+                return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+            except subprocess.TimeoutExpired:
+                now = time.monotonic()
+                took += min(now - mark, wait + 1)
+                mark = now
+                if took >= seconds:
+                    try:
+                        os.killpg(p.pid, signal.SIGKILL)
+                    except OSError:
+                        p.kill()
+                    p.communicate()
+                    raise RuntimeError(f"{what} took longer than {span(seconds)}")
+                print(f"    still working: {what}, {span(took)}", file=sys.stderr, flush=True)
+    finally:
+        _TOOL_PID = None
+        if left:
+            signal.alarm(left)   # the file's clock goes on where it stopped
 
 
 def sha16(path):
@@ -77,10 +190,12 @@ def is_lfs_pointer(path):
 def heic_to_jpeg(src, dest):
     """Convert a HEIC/HEIF photo (an iPhone's default) to JPEG. True if it worked."""
     if shutil.which("sips"):
-        r = subprocess.run(["sips", "-s", "format", "jpeg", src, "--out", dest],
-                           capture_output=True)
-        if r.returncode == 0 and os.path.exists(dest):
-            return True
+        try:
+            r = run_tool(["sips", "-s", "format", "jpeg", src, "--out", dest], SIPS_SECONDS, "sips")
+            if r.returncode == 0 and os.path.exists(dest):
+                return True
+        except RuntimeError:
+            pass   # too slow: Pillow may still manage
     try:
         import pillow_heif
         from PIL import Image
@@ -138,8 +253,7 @@ def ocr_image(path, tmpdir):
         img = upright_copy(path, tmpdir, turn)
         if turn and img == path:
             break   # no Pillow: nothing to turn
-        r = subprocess.run(["tesseract", img, "stdout", "-l", "eng"],
-                           capture_output=True, text=True, errors="replace")
+        r = run_tool(["tesseract", img, "stdout", "-l", "eng"], TESSERACT_SECONDS, "tesseract", text=True)
         if r.returncode != 0:
             raise RuntimeError("tesseract: " + (r.stderr or "failed").strip()[:150])
         text = r.stdout.strip()
@@ -162,12 +276,18 @@ def main():
                     help="defer (skip, don't write) scanned PDFs with more than N pages; 0 = no limit")
     ap.add_argument("--list", default="",
                     help="only process the sources named in this file, one path per line")
+    ap.add_argument("--file-seconds", type=int,
+                    default=int(os.environ.get("WIKI_CONVERT_FILE_SECONDS") or FILE_SECONDS),
+                    help="time one file's conversion may take, outside tools apart; 0 = no limit "
+                         f"(default {FILE_SECONDS}, or WIKI_CONVERT_FILE_SECONDS)")
     a = ap.parse_args()
+    signal.signal(signal.SIGTERM, _on_term)
     wanted = None
     if a.list:
         root = os.path.abspath(a.root)
         with open(a.list, encoding="utf-8") as f:
-            wanted = {os.path.relpath(os.path.abspath(p.strip()), root) for p in f if p.strip()}
+            # One path per line, exactly as listed: a name may end in a space.
+            wanted = {os.path.relpath(os.path.abspath(p.rstrip("\n")), root) for p in f if p.rstrip("\n")}
 
     from markitdown import MarkItDown
     md = MarkItDown(enable_plugins=False)
@@ -178,7 +298,8 @@ def main():
               "(install: tesseract + ghostscript + `pip install ocrmypdf`)")
 
     done = skipped = ocred = flagged = errors = idx = deferred = 0
-    for dirpath, _, files in os.walk(a.root):
+    for dirpath, dirs, files in os.walk(a.root):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))   # as the runner's listing
         for fn in sorted(files):
             if fn.startswith(".") or fn == ".gitkeep":
                 continue
@@ -190,7 +311,10 @@ def main():
             if wanted is not None and rel not in wanted:
                 continue
             outp = os.path.join(a.out, rel + ".md")
-            os.makedirs(os.path.dirname(outp), exist_ok=True)
+            try:
+                os.makedirs(os.path.dirname(outp), exist_ok=True)
+            except OSError:
+                pass   # writing the mirror fails too, and says so
 
             if not a.force and os.path.exists(outp) and os.path.getmtime(outp) >= os.path.getmtime(src):
                 skipped += 1
@@ -199,11 +323,12 @@ def main():
             print(f"[{idx}] {rel}", file=sys.stderr, flush=True)
             if is_lfs_pointer(src):
                 errors += 1
-                _write(outp, rel, "ERROR", note="git-lfs pointer not materialized (run `git lfs pull`)")
+                _write_error(outp, rel, "git-lfs pointer not materialized (run `git lfs pull`)")
                 continue
 
             method, target, note, tmpdir, preview_rel, taken = "markitdown", src, "", None, "", ""
             try:
+                start_clock(a.file_seconds)
                 if ext in TEXT_NATIVE:
                     text = open(src, encoding="utf-8", errors="replace").read()
                     method = "copy"
@@ -263,19 +388,32 @@ def main():
                                 print(f"    ocr: {npages} pages", file=sys.stderr, flush=True)
                                 tmpdir = tempfile.mkdtemp()
                                 ocr_pdf = os.path.join(tmpdir, "ocr.pdf")
-                                subprocess.run(
-                                    ["ocrmypdf", "--force-ocr", "--output-type", "pdf",
-                                     "-l", "eng", src, ocr_pdf],
-                                    check=True, capture_output=True)
+                                r = run_tool(["ocrmypdf", "--force-ocr", "--output-type", "pdf",
+                                              "--jobs", str(ocr_jobs()), "-l", "eng", src, ocr_pdf],
+                                             min(OCR_MAX_SECONDS, OCR_SECONDS + OCR_PAGE_SECONDS * max(1, npages or 1)),
+                                             "OCR")
+                                if r.returncode != 0:
+                                    said = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+                                    raise RuntimeError(f"ocrmypdf exited {r.returncode}"
+                                                       + (f": {said[-1][:150]}" if said else ""))
                                 target, method = ocr_pdf, "ocr+markitdown"
                                 ocred += 1
                     text = md.convert(target).text_content
+                stop_clock()
                 _write(outp, rel, method, text=text, src=src, note=note, preview=preview_rel, taken=taken)
                 done += 1
-            except Exception as e:
+            except FileTimeout:
+                stop_clock()
                 errors += 1
-                _write(outp, rel, "ERROR", note=str(e)[:200])
+                print(f"    stopped: the conversion took longer than {span(a.file_seconds)}",
+                      file=sys.stderr, flush=True)
+                _write_error(outp, rel, f"conversion took too long (over {span(a.file_seconds)})")
+            except Exception as e:
+                stop_clock()
+                errors += 1
+                _write_error(outp, rel, str(e)[:200])
             finally:
+                stop_clock()
                 if tmpdir:
                     shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -299,6 +437,23 @@ def _write(outp, rel, method, text=None, src=None, note="", preview="", taken=""
     body = text if text else ""
     with open(outp, "w", encoding="utf-8") as g:
         g.write("---\n" + "\n".join(fm) + "\n---\n\n" + body)
+
+
+def _write_error(outp, rel, note):
+    """An ERROR mirror, from inside the loop: one that cannot be written either (the name
+    too long for "<name>.md", a full disk) is reported, and the next file starts."""
+    try:
+        _write(outp, rel, "ERROR", note=note)
+    except OSError as w:
+        print(f"    could not write the mirror: {w}", file=sys.stderr, flush=True)
+
+
+def write_error(outp, rel, note):
+    """An ERROR mirror for one source, written from outside (the runner, when this script
+    died or hung on that file): the file then counts as converted and unreadable, and is
+    not converted again until it changes."""
+    os.makedirs(os.path.dirname(outp), exist_ok=True)
+    _write(outp, rel, "ERROR", note=note)
 
 
 def _summary(done, ocred, flagged, skipped, errors, deferred, out, limit=False):
