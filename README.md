@@ -199,7 +199,11 @@ options compare are in `INSTALL.md`.
 - Sent to Anthropic: the text Claude reads while it works, nothing else. With the model on
   this Mac, nothing at all.
 - Sent to TypeSafe, only if you save a TypeSafe key (Claude only): each review question,
-  its answers, and the parts of the wiki and the document it is about. The key is kept in
+  its answers, and the parts of the wiki and the document it is about; and, only if you
+  turn on Jev's overview check (`"overviews": {"jev": true}` in `wiki.config.json`), a
+  page's overview with the facts it was written from; and, only if you turn on Jev's choice of
+  reader (`"fast": {"routing": {"jev": true}}`), the start of each document code cannot
+  place itself (up to 12,000 characters) with its file name. The key is kept in
   the Keychain.
 - Version history: a local git history in the wiki folder, never pushed anywhere.
 

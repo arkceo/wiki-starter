@@ -2,6 +2,25 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Faster runs: page overviews only when they would change
+- **Overviews are written again only when what they summarise changed.** The short
+  overview at the top of a company, person or topic page is no longer rewritten when its
+  facts, roles and relationships are the same as when it was last written, and no call is
+  made for a page whose overview you edited yourself (it is left as you wrote it). A new
+  price, fee or payment term always brings a fresh overview. This saves time on every run
+  that touches pages you already have, most of all with the model on this Mac, and money
+  when Claude is paid per use.
+- **Reading costs about a tenth less.** The reading instructions, the same for every
+  document, are now sent so that Claude can reuse them from its cache instead of paying for
+  them again with each document.
+- **What each run cost, call by call.** The runner log now says how many calls went to
+  reading and how many to overviews, what each cost, and how many words Claude read from
+  its cache.
+- **A cheaper reader, if you want it.** Off by default. Turned on (`"fast": {"routing":
+  {"enabled": true}}` in `wiki.config.json`), short invoices, receipts, quotations and
+  orders are read by a lighter, cheaper Claude model, and everything else by the usual one.
+  An answer that misses the document's figures is read again by the usual model.
+
 ## The menu in sections
 - **The menu on the left is sorted into sections:** Company Profile, Marketing, Sales,
   Customer Service, Human Resources, Operation, Legal, Account and Finance. Only parts

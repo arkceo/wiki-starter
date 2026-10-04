@@ -134,15 +134,38 @@ class Claude:
         self.running = set()
         self.stopped = False
         self.stats = {"calls": 0, "failed": 0, "cost": 0.0, "seconds": 0.0, "costed": 0}
+        # The same, per kind of call ("read", "overview", "other"), with the tokens Claude
+        # reported: what the run's summary shows, so a cost can be traced to its calls.
+        self.kinds = {}
+        self.no_effort = False  # this claude does not know --effort (an older CLI)
         self.deadline = None   # local_engine.Model's interface: a per-call limit is used instead
 
-    def ask(self, sysmsg, user, schema, max_tokens=None, read_dirs=()):
+    def ask(self, sysmsg, user, schema, max_tokens=None, read_dirs=(), kind="other", model=None, effort=None):
+        """kind names the call in the run's summary; model and effort, when given, are this
+        call's own (an effort is never sent to Haiku, which has no such setting)."""
+        model = model or self.model
+        effort = effort if effort and not self.no_effort and "haiku" not in (model or "").lower() else None
+        try:
+            return self._ask(sysmsg, user, schema, read_dirs, kind, model, effort)
+        except (RuntimeError, ClaudeUnavailable) as e:
+            # An older claude refuses the flag before it starts ("error: unknown option
+            # '--effort'"): the call is asked again without it, and so is every later one.
+            said = str(e).lower()
+            if effort and "--effort" in said and ("unknown option" in said or "unknown argument" in said):
+                with self.lock:
+                    self.no_effort = True
+                return self._ask(sysmsg, user, schema, read_dirs, kind, model, None)
+            raise
+
+    def _ask(self, sysmsg, user, schema, read_dirs, kind, model, effort):
         cmd = [self.bin, "-p", "--output-format", "json", "--no-session-persistence",
                "--setting-sources", "", "--strict-mcp-config",
                "--system-prompt", sysmsg, "--json-schema", json.dumps(loose(schema)),
                "--max-budget-usd", f"{self.budget:.2f}"]
-        if self.model:
-            cmd += ["--model", self.model]
+        if model:
+            cmd += ["--model", model]
+        if effort:
+            cmd += ["--effort", effort]
         if read_dirs:
             # Read, and only inside these folders ("//" marks an absolute path in a rule).
             rules = ",".join(f"Read(/{os.path.abspath(d)}/**)" for d in read_dirs)
@@ -151,12 +174,16 @@ class Claude:
                 cmd += ["--add-dir", d]
         else:
             cmd += ["--tools", ""]
+        # Haiku thinks at length before a structured answer unless told not to: in a real run
+        # nine tenths of a Haiku read's output was hidden thinking, billed as output, which made
+        # it dearer than Sonnet's read. Haiku has no effort setting, so its thinking is off.
+        env = dict(os.environ, MAX_THINKING_TOKENS="0") if "haiku" in (model or "").lower() else None
         t0 = time.time()
         with self.lock:
             if self.stopped:
                 raise ClaudeUnavailable("the run is stopping")
             try:
-                p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env,
                                      stderr=subprocess.PIPE, text=True, cwd=self.cwd, start_new_session=True)
             except FileNotFoundError:
                 raise ClaudeUnavailable(f"the {self.bin} command is not installed")
@@ -165,15 +192,16 @@ class Claude:
             out, err = p.communicate(user, timeout=self.timeout)
         except subprocess.TimeoutExpired:
             self._kill(p)
-            self._count(time.time() - t0, None, failed=True)
+            self._count(time.time() - t0, None, failed=True, kind=kind)
             raise RuntimeError(f"Claude gave no answer within {self.timeout:.0f}s")
         finally:
             with self.lock:
                 self.running.discard(p)
         rec = answer_of(out)
         cost = (rec or {}).get("total_cost_usd")
+        usage = (rec or {}).get("usage")
         if rec is None or rec.get("is_error") or rec.get("subtype") not in (None, "success"):
-            self._count(time.time() - t0, cost, failed=True)
+            self._count(time.time() - t0, cost, failed=True, kind=kind, usage=usage)
             said = str((rec or {}).get("result") or "").strip() or (err or "").strip()
             status = (rec or {}).get("api_error_status")
             server = isinstance(status, int) and not isinstance(status, bool) and status >= 500
@@ -183,7 +211,7 @@ class Claude:
             # Its start ("API Error: ...", read by the reader's fallback) and its end.
             said = said if len(said) <= 300 else f"{said[:120]} ... {said[-170:]}"
             raise RuntimeError(f"Claude: {(rec or {}).get('subtype') or 'no answer'}: {said}")
-        self._count(time.time() - t0, cost)
+        self._count(time.time() - t0, cost, kind=kind, usage=usage)
         answer = rec.get("structured_output")
         if not isinstance(answer, dict):
             try:
@@ -198,14 +226,32 @@ class Claude:
         with self.lock:
             return self.stats["cost"]
 
-    def _count(self, seconds, cost, failed=False):
+    def _count(self, seconds, cost, failed=False, kind="other", usage=None):
         with self.lock:
-            self.stats["calls"] += 1
+            k = self.kinds.setdefault(kind, {"calls": 0, "cost": 0.0, "seconds": 0.0, "input": 0,
+                                             "cache_read": 0, "cache_write": 0, "output": 0})
+            for d in (self.stats, k):
+                d["calls"] += 1
+                d["seconds"] += seconds
+                if isinstance(cost, (int, float)):
+                    d["cost"] += float(cost)
             self.stats["failed"] += 1 if failed else 0
-            self.stats["seconds"] += seconds
             if isinstance(cost, (int, float)):
-                self.stats["cost"] += float(cost)
                 self.stats["costed"] += 1
+            usage = usage if isinstance(usage, dict) else {}
+            for name, field in (("input", "input_tokens"), ("cache_read", "cache_read_input_tokens"),
+                                ("cache_write", "cache_creation_input_tokens"), ("output", "output_tokens")):
+                v = usage.get(field)
+                if isinstance(v, int) and not isinstance(v, bool):
+                    k[name] += v
+
+    def summary(self):
+        """One line per kind of call: calls, cost, time and tokens (input, read from the
+        cache, written to it, output), for the runner log."""
+        with self.lock:
+            return "; ".join(f"{kind} {k['calls']} calls ${k['cost']:.4f} {k['seconds']:.0f}s "
+                             f"in {k['input']} cached {k['cache_read']} cache-write {k['cache_write']} out {k['output']}"
+                             for kind, k in sorted(self.kinds.items()))
 
     @staticmethod
     def _kill(p):

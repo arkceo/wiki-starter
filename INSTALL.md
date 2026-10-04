@@ -123,6 +123,24 @@ when you can.
   performance mode (Economical, Moderate, Maximum performance: batch size, largest upload
   and spending cap per batch), review mode, the Jev key, title and company name. They are
   saved in `wiki.config.json`; `scripts/wiki_settings.py` has the figures.
+- **Cached reading instructions** (on) → the reading instructions, the same for every
+  document, go where Claude can reuse them from its cache; `"fast": {"cacheInstructions":
+  false}` turns it off.
+- **Page overviews** → the short overview at the top of a page is written again only when
+  what it summarises changed, and never over one you edited. `"overviews"` in
+  `wiki.config.json` holds the switches: `skipUnchanged` (on), `skipImmaterial` (off: skip
+  when only another document in a role the page already had came in), `jev` (off: with
+  Claude, a TypeSafe key and an Anthropic API key, Jev judges whether an overview still
+  holds; it is sent that overview and the page's facts) and `jevBar` (0.9). A new price,
+  fee or payment term always brings a fresh overview.
+- **A cheaper reader where it is enough** (off) → with Claude, short text invoices,
+  receipts, quotations and orders are read by a lighter, cheaper model (`fastModel`, Haiku,
+  its thinking off), and everything else by the usual one. `"fast": {"routing": {"enabled":
+  true}}` in `wiki.config.json` turns it on. With `"jev": true` and a TypeSafe key, Jev
+  judges the documents code cannot place from their start (`jevBar`, 0.7) instead of
+  sending them to the usual model. Code checks every answer of the lighter model
+  and has one that missed the document's figures read again by the usual one
+  (`minCoverage`, 0.5); the runner log counts how many were.
 
 ## Costs
 
@@ -151,7 +169,10 @@ when you can.
   Anthropic account is used.
 - Jev is off until a TypeSafe API key is saved, by the installer or in Settings, and is
   never used with the model on this Mac. With a key, each review question, its answers, and the parts of
-  the wiki and the document it is about are sent to TypeSafe to be scored; nothing else.
+  the wiki and the document it is about are sent to TypeSafe to be scored. If you turn on
+  Jev's overview check, a page's overview and its facts are sent too; if you turn on
+  choosing a reader per document, the file name and start (up to 12,000 characters) of
+  each document code cannot place itself. Nothing else.
   The key is kept in the Keychain, not in a file.
 - Source documents are not kept in the wiki's git history. **Turn on Time Machine.**
 

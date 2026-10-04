@@ -370,8 +370,9 @@ class Model:
         if not self.external:
             self.url = None
 
-    def ask(self, system, user, schema, max_tokens=1500):
-        """One question, answered as JSON that matches schema. Returns the parsed object."""
+    def ask(self, system, user, schema, max_tokens=1500, kind=""):
+        """One question, answered as JSON that matches schema. Returns the parsed object.
+        kind names the call for Claude's summary and means nothing here."""
         if not self.url:
             self.start()
         body = {
@@ -747,6 +748,14 @@ class Run:
     inflight_path = ""  # ... kept in this file for the runner (--inflight)
     inflight_lock = threading.Lock()
     why_path = ""     # why the model or Claude could not run, for the runner (--why)
+    models = {}       # Claude's model per kind of call, where it is not the reader's ("fast")
+    efforts = {}      # Claude's effort per kind of call ("fast"); none: Claude's own default
+    instructions_in_system = False   # the reading instructions in the system prompt ("fast")
+    overviews = {}    # when an overview is not written again (wiki.config.json "overviews")
+    overview_counts = {}  # this run's overviews: written, skipped (and why), failed
+    routing = {}      # which reader each document goes to ("fast": "routing"); empty: one reader
+    routed = {}       # this run's routing: how many documents went where, and why
+    routed_lock = threading.Lock()
 
 
 def in_flight(src, on):
@@ -1322,9 +1331,12 @@ class ClaudeModel:
         self.deadline = None
         self.stats = self.claude.stats
 
-    def ask(self, system, user, schema, max_tokens=1500, read_dirs=()):
+    def ask(self, system, user, schema, max_tokens=1500, read_dirs=(), kind="other"):
+        """kind: "read" (a document), "overview" (a page's overview) or "other". Each kind
+        can have its own model and effort (Run.models, Run.efforts: wiki.config.json "fast")."""
         try:
-            return self.claude.ask(system, user, schema, read_dirs=read_dirs)
+            return self.claude.ask(system, user, schema, read_dirs=read_dirs, kind=kind,
+                                   model=Run.models.get(kind), effort=Run.efforts.get(kind))
         except wiki_claude.ClaudeUnavailable as e:
             raise ModelUnavailable(f"Claude could not run: {e}")
 
@@ -1389,6 +1401,159 @@ LOOK_AT = ("\nThe text above was converted from a photo or a scan and may be inc
            "the original with the Read tool: {path} (read only that file), and answer from what you see.\n")
 
 
+# ------------------------------------------------------------ which reader -----
+# Off by default ("fast": {"routing": {"enabled": true}} turns it on): a lighter, cheaper
+# reader ("fastModel", Haiku) for the documents it can read fully, the reader's own model
+# (Sonnet) for the rest. Code sorts the clear cases and sends everything else to the
+# reader's own model; with "jev": true, Jev (TypeSafe) judges those others from an excerpt
+# instead (off by default: in a real gold-set run it never found one the lighter reader
+# could take). Code checks every answer of the lighter reader and has a thin one read again
+# by the reader's own model. A wrong guess costs a second read, never a worse page.
+ROUTING_DEFAULTS = {"enabled": False, "fastModel": "haiku", "jev": False, "jevBar": 0.7,
+                    "maxFastChars": 20000, "simpleChars": 6000, "minCoverage": 0.5}
+SIMPLE_DOC_RE = re.compile(r"(?i)\b(tax invoice|invoice|receipt|quotation|quote|purchase order|"
+                           r"delivery order|delivery note|credit note|debit note|payment voucher)\b")
+CONTRACT_NAME_RE = re.compile(r"(?i)(agreement|contract|tenancy|lease|\bmou\b|memorandum|\bdeed|terms)")
+CONTRACT_RE = re.compile(r"(?i)\b(whereas|hereinafter|hereby agree|the parties agree|in witness whereof|"
+                         r"this agreement|this contract|tenancy agreement|memorandum of understanding)\b")
+SHEET_EXT = {".xlsx", ".xlsm", ".xls", ".ods", ".csv", ".numbers"}
+TABLE_LINES = 60     # more table rows than this: a table-heavy document, for the full reader
+JEV_ROUTE_Q = ("Will a fast, lighter reader capture every figure, date, identifier and party in this "
+               "document fully and correctly, so that a stronger reader is not needed?")
+_jev_routing = threading.BoundedSemaphore(4)   # wiki_jev.PARALLEL requests at once
+
+
+def routing_settings(fast, config):
+    """The "routing" settings under "fast", with the defaults; the TypeSafe key in "jev_key"
+    when Jev may judge in this run, else ""."""
+    got = fast.get("routing") if isinstance(fast.get("routing"), dict) else {}
+    s = dict(ROUTING_DEFAULTS)
+    for k, v in got.items():
+        want = type(s.get(k))
+        if k not in s or isinstance(v, bool) != (want is bool):
+            continue
+        if want is str and isinstance(v, str) and v.strip():
+            s[k] = v.strip()
+        elif want in (int, float) and isinstance(v, (int, float)) and v >= 0:
+            s[k] = want(v)
+        elif want is bool:
+            s[k] = v
+    s["jev_key"] = ""
+    if s["enabled"] and s["jev"]:
+        try:
+            import wiki_jev
+            if wiki_jev.available(config):
+                s["jev_key"] = wiki_jev.get_key() or ""
+        except Exception as e:
+            log(f"Jev will not choose readers: {e}")
+    return s
+
+
+def routed(what):
+    with Run.routed_lock:
+        Run.routed[what] = Run.routed.get(what, 0) + 1
+
+
+def route_by_code(name, body, look, truncated):
+    """("full" | "fast" | "ask", why) from what code can see before reading: photos, scans,
+    long, table-heavy documents and contracts go to the full reader; a short invoice,
+    receipt, quotation or order goes to the lighter one; the rest is for Jev."""
+    s = Run.routing
+    if look:
+        return "full", "a photo or a scan"
+    if truncated or len(body) > s["maxFastChars"]:
+        return "full", "long"
+    head = name + "\n" + body[:3000]
+    if CONTRACT_NAME_RE.search(name) or CONTRACT_RE.search(body[:5000]):
+        return "full", "a contract or formal document"
+    if sum(1 for l in body.splitlines() if l.count("|") >= 3) > TABLE_LINES:
+        return "full", "many table rows"
+    # A spreadsheet that names invoices (a ledger, a listing) is not an invoice: Jev judges it.
+    if (len(body) <= s["simpleChars"] and SIMPLE_DOC_RE.search(head)
+            and os.path.splitext(name)[1].lower() not in SHEET_EXT):
+        return "fast", "a short invoice, receipt, quotation or order"
+    return "ask", ""
+
+
+def jev_route(name, body):
+    """Jev's probability that the lighter reader gets this document fully right; None on any
+    failure. Jev sees the file name, a few counts and the document's start."""
+    import wiki_jev
+    _, nums = F.numbers_in(body)
+    tables = sum(1 for l in body.splitlines() if l.count("|") >= 3)
+    state = (f"Document file name: {name}\nLength: {len(body)} characters, {len(body.splitlines())} lines, "
+             f"{tables} table rows, {len(nums)} distinct numbers.\nThe document's start:\n"
+             f"{body[:wiki_jev.DOC_CHARS]}")
+    try:
+        with _jev_routing:
+            out = wiki_jev.call(state, {"q": {"type": "noul", "instructions": JEV_ROUTE_Q}}, Run.routing["jev_key"])
+        p = (out["answers"].get("q") or {}).get("noul")
+    except Exception as e:
+        log(f"Jev could not choose a reader for {name}: {e}")
+        return None
+    return float(p) if isinstance(p, (int, float)) and not isinstance(p, bool) else None
+
+
+def choose_reader(name, body, look, truncated):
+    """"fast" or "full" for one document, counted in Run.routed."""
+    where, why = route_by_code(name, body, look, truncated)
+    if where != "ask":
+        routed(f"code-{where}")
+        return where, why
+    if not Run.routing.get("jev_key"):
+        routed("code-full")
+        return "full", "no one to judge it"
+    p = jev_route(name, body)
+    if p is None:
+        routed("jev-error")
+        return "full", "Jev could not judge it"
+    where = "fast" if p >= Run.routing["jevBar"] else "full"
+    routed(f"jev-{where}")
+    return where, f"Jev {p:.2f}"
+
+
+def routing_summary():
+    """One line for the runner log: where the documents went, and how many the lighter
+    reader had to leave to a second read (above about a quarter, it stops saving money)."""
+    r = Run.routed
+    fast = r.get("code-fast", 0) + r.get("jev-fast", 0)
+    full = r.get("code-full", 0) + r.get("jev-full", 0) + r.get("jev-error", 0)
+    again = r.get("reread", 0)
+    return (f"{fast} to the lighter reader (code {r.get('code-fast', 0)}, Jev {r.get('jev-fast', 0)}), "
+            f"{full} to the full reader (code {r.get('code-full', 0)}, Jev {r.get('jev-full', 0)}, "
+            f"Jev failed {r.get('jev-error', 0)}), {again} read again"
+            + (f" ({again / fast:.0%} of the lighter reader's)" if fast else ""))
+
+
+def _strings(x):
+    if isinstance(x, str):
+        yield x
+    elif isinstance(x, dict):
+        for v in x.values():
+            yield from _strings(v)
+    elif isinstance(x, list):
+        for v in x:
+            yield from _strings(v)
+
+
+def thin_answer(a, body):
+    """Why the lighter reader's answer looks incomplete ("" when it does not): no summary,
+    no parties for a document with text, or too few of the document's numbers and dates
+    anywhere in the answer."""
+    if not a.get("summary"):
+        return "no summary"
+    if len(body.strip()) > 200 and not a.get("parties"):
+        return "no parties"
+    dates, nums = F.numbers_in(body)
+    wanted = dates | {n for n in nums if len(n.replace(".", "")) >= 3}
+    if len(wanted) >= 4:
+        got_d, got_n = F.numbers_in("\n".join(_strings(a)))
+        share = len(wanted & (got_d | got_n)) / len(wanted)
+        if share < Run.routing["minCoverage"]:
+            return f"{share:.0%} of its numbers"
+    return ""
+
+
 def claude_read(model, src, sysmsg, listing, titles, proj_list):
     """Claude's one answer about one document. Runs in a worker thread: it reads files and
     asks, and never writes anything."""
@@ -1410,14 +1575,40 @@ def claude_read(model, src, sysmsg, listing, titles, proj_list):
     if preview and os.path.isfile(os.path.join(WIKI_DIR, "cache", "md", preview)):
         target = os.path.join(WIKI_DIR, "cache", "md", preview)   # a HEIC photo's JPEG copy
     truncated = len(body) > CLAUDE_DOC_CHARS
+    instructions = Q_EXTRACT.format(listing=listing, projects=", ".join(proj_list), menu=menu_question())
     user = (f"Document file name: {name}\n<document>\n{body[:CLAUDE_DOC_CHARS]}\n</document>\n"
-            + (f"\nOnly the start of this long document is shown ({CLAUDE_DOC_CHARS} characters).\n" if truncated else "")
-            + (LOOK_AT.format(path=target) if look else "")
-            + "\n" + Q_EXTRACT.format(listing=listing, projects=", ".join(proj_list), menu=menu_question()))
+            + (f"\nOnly the start of this long document is shown ({CLAUDE_DOC_CHARS} characters).\n" if truncated else ""))
+    if Run.instructions_in_system:
+        # The same instructions for every document of the run, in the system prompt: the part
+        # of each call that Claude can read from its cache instead of paying for it again.
+        sysmsg = sysmsg + "\n\nHow to read each document you are given:\n" + instructions.replace(
+            "the whole document above", "the whole document")
+        user += (LOOK_AT.format(path=target) if look else "") + "\nAnswer every part of the reading instructions."
+    else:
+        user += (LOOK_AT.format(path=target) if look else "") + "\n" + instructions
     wiki_events.emit("read", file=src)
     log(f"reading {src} (Claude)")
     schema, dirs = extract_schema(titles, proj_list), [os.path.dirname(target)] if look else ()
-    a = model.ask(sysmsg, user, schema, read_dirs=dirs)
+    a = None
+    if Run.routing.get("enabled"):
+        where, why = choose_reader(name, body, look, truncated)
+        if where == "fast":
+            log(f"{src}: the lighter reader ({why})")
+            try:
+                a = model.ask(sysmsg, user, schema, read_dirs=dirs, kind="read-fast")
+                thin = thin_answer(a, body)
+            except ModelUnavailable:
+                raise
+            except Exception as e:
+                thin = f"it failed: {e}"
+            if thin:
+                log(f"{src}: the lighter reader's answer looks thin ({thin}); reading it again")
+                routed("reread")
+                a = model.ask(sysmsg, user, schema, read_dirs=dirs, kind="reread")
+        else:
+            log(f"{src}: the full reader ({why})")
+    if a is None:
+        a = model.ask(sysmsg, user, schema, read_dirs=dirs, kind="read")
     if (not (a.get("parties") or a.get("figures") or a.get("photo")) and len(a.get("summary") or []) < 2
             and len(body.strip()) > 200):
         # An answer with nothing in it, for a document with text: it happens now and then
@@ -1425,7 +1616,7 @@ def claude_read(model, src, sysmsg, listing, titles, proj_list):
         # with one summary line and no parties or figures counts as empty: after a malformed
         # first answer Claude sometimes sends just that.
         log(f"{src}: Claude's answer was empty; asking again")
-        a = model.ask(sysmsg, user, schema, read_dirs=dirs)
+        a = model.ask(sysmsg, user, schema, read_dirs=dirs, kind="read")
     return {"src": src, "answer": a, "body": body, "truncated": truncated, "picture": picture,
             "taken": fm_get(fm, "taken")}
 
@@ -2726,9 +2917,10 @@ def apply_packet(wiki, claims, p, archived, plan, touched):
 
 
 # ================================================================ end of run =====
-def prose_context(wiki, claims, rel, kind):
+def prose_context(wiki, claims, rel, kind, roles=True):
     """What the model may use for a page's overview: its recorded facts, relationships
-    and roles (an entity), or the points its documents make (a topic)."""
+    and roles (an entity), or the points its documents make (a topic). roles=False leaves
+    the roles out (to tell whether only roles changed since the last overview)."""
     title = wiki.pages[rel]["title"]
     title_of = lambda r: wiki.pages.get(r, {}).get("title") or r  # noqa: E731
     if kind == "topic":
@@ -2744,8 +2936,11 @@ def prose_context(wiki, claims, rel, kind):
     own = "own-company" in tags
     if own:
         lines.append("This is the business's own company: the documents are its records.")
-    roles = [f"{r['value']} ({r.get('source_title') or 'a document'})" for r in claims.records("_doc", rel) if r.get("value")]
     if roles and not own:
+        roles = [f"{r['value']} ({r.get('source_title') or 'a document'})" for r in claims.records("_doc", rel) if r.get("value")]
+    else:
+        roles = []
+    if roles:
         lines += ["Its role in the documents:"] + [f"- {x}" for x in list(dict.fromkeys(roles))[:12]]
     facts = []
     # A person's page gets no dates or references: "prepared on 3 July" is about a document.
@@ -2796,7 +2991,7 @@ def overview_for(model, sysmsg, wiki, rel, kind, title, ctx):
     a = model.ask(sysmsg, f"Write 2 to 4 short sentences for the top of the wiki page \"{title}\": {what}. "
                   "Use only the information below and add nothing else. Keep names, amounts and dates "
                   "exactly as given. Where a value changed, give the current one and what it was before.\n\n"
-                  + ctx, PROSE_SCHEMA, max_tokens=500)
+                  + ctx, PROSE_SCHEMA, max_tokens=500, kind="overview")
     nums = F.numbers_in(ctx)
     keep = [s for s in (a.get("sentences") or []) if clean_line(s) and not F.ungrounded_numbers(s, nums)]
     if not keep:
@@ -2805,14 +3000,158 @@ def overview_for(model, sysmsg, wiki, rel, kind, title, ctx):
     return " ".join(LP.linked(s, names, 600) for s in keep)
 
 
+# When a page's overview is not written again (wiki.config.json "overviews"). An overview
+# is written from prose_context(), a text code builds; archive/overview-basis.json keeps,
+# per page, the text its overview was last written from. A page is skipped when:
+#   - a person edited its engine block (the overview could not be placed anyway; always);
+#   - the text is the same as last time ("skipUnchanged", on by default);
+#   - only new roles came in, each one the page already had ("skipImmaterial", entity
+#     pages only, off by default), e.g. one more invoice from the same supplier;
+#   - Jev, asked with the old overview and both texts, is at least "jevBar" sure that the
+#     overview still holds ("jev", off by default; only with Claude, a TypeSafe key, and
+#     Claude paid per use with an API key unless "jevOnPlan").
+# It is always written again when it has none, when a standing term (a price, a fee,
+# payment terms, ...: F.COMPARED) changed, or when it states a number that is no longer
+# current; and whenever anything goes wrong. A skip keeps the basis where it was, so small
+# changes add up and are judged together next time.
+OVERVIEW_DEFAULTS = {"skipUnchanged": True, "skipImmaterial": False, "jev": False, "jevBar": 0.9,
+                     "jevOnPlan": False}
+OVERVIEW_BASIS = "archive/overview-basis.json"
+BEFORE_RE = re.compile(r"\s*\(before: [^()]*\)")
+JEV_OVERVIEW_Q = ("Is the current overview still accurate and complete enough for the top of this wiki page, "
+                  "given the facts now, so that rewriting it would add nothing important? Answer no if any value "
+                  "it states has changed, if an important new fact, relationship or role is missing, or if "
+                  "anything it says is no longer true.")
+
+
+def overview_settings(config):
+    o = config.get("overviews") if isinstance(config.get("overviews"), dict) else {}
+    out = dict(OVERVIEW_DEFAULTS)
+    for k in ("skipUnchanged", "skipImmaterial", "jev", "jevOnPlan"):
+        if isinstance(o.get(k), bool):
+            out[k] = o[k]
+    try:
+        out["jevBar"] = min(0.99, max(0.5, float(o.get("jevBar", OVERVIEW_DEFAULTS["jevBar"]))))
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
+def load_basis():
+    try:
+        with open(os.path.join(WIKI_DIR, OVERVIEW_BASIS), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(v, dict) and isinstance(v.get("ctx"), str)} \
+        if isinstance(data, dict) else {}
+
+
+def save_basis(basis):
+    path = os.path.join(WIKI_DIR, OVERVIEW_BASIS)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(basis, f, ensure_ascii=False, indent=1, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def standing_terms(wiki, claims, rel):
+    """The page's current standing terms (F.COMPARED), by what they are about."""
+    title_of = lambda r: wiki.pages.get(r, {}).get("title") or r  # noqa: E731
+    return {LP.fact_label(g[0], title_of): str(g[0].get("value") or "")
+            for g in claims.facts(rel) if g[0]["attribute"] in F.COMPARED}
+
+
+def page_roles(claims, rel):
+    return sorted({r["value"] for r in claims.records("_doc", rel) if r.get("value")})
+
+
+def current_numbers(ctx):
+    """The numbers a prose context states as current (a "(before: ...)" value is not)."""
+    return F.numbers_in(BEFORE_RE.sub("", ctx))
+
+
+def overview_basis(wiki, claims, rel, kind, ctx):
+    rec = {"ctx": ctx, "kind": kind, "at": datetime.date.today().isoformat()}
+    if kind != "topic":
+        rec.update(terms=standing_terms(wiki, claims, rel), roles=page_roles(claims, rel),
+                   ctx_no_roles=prose_context(wiki, claims, rel, kind, roles=False))
+    return rec
+
+
+def overview_gate(wiki, claims, rel, kind, ctx, body, old, settings):
+    """("write" | "skip" | "jev", why) for one page the run touched (see OVERVIEW_DEFAULTS)."""
+    if LP.block_edited(body):
+        return "skip", "edited"
+    if not old:
+        return "write", "no basis"
+    existing = LP.block_section(body, "Overview")
+    if not existing.strip():
+        return "write", "no overview"
+    if kind != "topic":
+        before, now = old.get("terms") if isinstance(old.get("terms"), dict) else {}, standing_terms(wiki, claims, rel)
+        if any(before.get(k) != v for k, v in now.items()):
+            return "write", "terms changed"
+    said_d, said_n = F.numbers_in(existing)
+    was_d, was_n = current_numbers(old["ctx"])
+    now_d, now_n = current_numbers(ctx)
+    if (said_d & was_d) - now_d or (said_n & was_n) - now_n:
+        return "write", "a number it states is no longer current"
+    if settings["skipUnchanged"] and ctx == old["ctx"]:
+        return "skip", "unchanged"
+    if (settings["skipImmaterial"] and kind == "entity" and isinstance(old.get("roles"), list)
+            and old.get("ctx_no_roles") == prose_context(wiki, claims, rel, kind, roles=False)
+            and set(page_roles(claims, rel)) <= set(old["roles"])):
+        return "skip", "immaterial"
+    if settings.get("jev_key"):
+        return "jev", ""
+    return "write", "changed"
+
+
+def jev_holds(title, existing, old_ctx, ctx, key):
+    """Jev's probability that the existing overview still holds; None on any failure."""
+    import wiki_jev
+    state = (f"Page: {title}\nCurrent overview:\n{existing}\nFacts it was written from:\n{old_ctx}\n"
+             f"Facts now:\n{ctx}")[:wiki_jev.STATE_CHARS]
+    try:
+        out = wiki_jev.call(state, {"q": {"type": "noul", "instructions": JEV_OVERVIEW_Q}}, key)
+        p = (out["answers"].get("q") or {}).get("noul")
+    except Exception as e:  # never a reason to fail the run: the overview is written
+        log(f"Jev could not judge the overview of {title}: {e}")
+        return None
+    return float(p) if isinstance(p, (int, float)) and not isinstance(p, bool) else None
+
+
+def jev_key_for_overviews(settings, config):
+    """The TypeSafe key, when Jev may judge overviews in this run; otherwise ""."""
+    if not settings["jev"] or Run.reader != "claude":
+        return ""
+    import wiki_jev
+    if not wiki_jev.available(config):
+        return ""
+    if not (os.environ.get("ANTHROPIC_API_KEY") or settings["jevOnPlan"]):
+        return ""   # on a Claude plan an overview costs nothing extra: Jev would only add cost
+    return wiki_jev.get_key()
+
+
 def refresh(model, wiki, claims, sysmsg, touched):
     """A short overview, written by the model from what is recorded, on every page this
-    run touched; code rebuilds the rest of each page's block. A failure leaves a page's
-    previous overview in place and never fails the run. With Claude (Run.lanes > 1) the
-    overviews are asked for all at once, Run.lanes at a time."""
+    run touched, unless the gate above finds it would add nothing; code rebuilds the rest
+    of each page's block. A failure leaves a page's previous overview in place and never
+    fails the run. With Claude (Run.lanes > 1) the overviews are asked for all at once,
+    Run.lanes at a time."""
     items = [(r, k) for r, k in touched.items() if os.path.exists(os.path.join(WIKI_DIR, r))]
     Run.current = ""
-    contexts = {}
+    settings = dict(Run.overviews or OVERVIEW_DEFAULTS)
+    try:
+        settings["jev_key"] = jev_key_for_overviews(settings, load_config())
+    except Exception as e:
+        log(f"Jev will not judge overviews: {e}")
+        settings["jev_key"] = ""
+    basis = load_basis()
+    contexts, gate = {}, {}
+    counts = {"written": 0, "edited": 0, "unchanged": 0, "immaterial": 0, "jev": 0, "failed": 0}
     for rel, kind in items:
         engine_topic = kind != "topic" or wiki.pages.get(rel, {}).get("engine")
         try:
@@ -2820,12 +3159,36 @@ def refresh(model, wiki, claims, sysmsg, touched):
         except Exception as e:
             log(f"overview of {rel} skipped: {e}")
             contexts[rel] = ""
+        if not contexts[rel]:
+            continue
+        try:
+            body = split_frontmatter(read(rel))[1]
+            gate[rel] = overview_gate(wiki, claims, rel, kind, contexts[rel], body, basis.get(rel), settings)
+        except Exception as e:  # when in doubt, write
+            log(f"overview of {rel}: {e}; writing it")
+            gate[rel] = ("write", "check failed")
+    asking_jev = [rel for rel, (g, _) in gate.items() if g == "jev"]
+    if asking_jev:
+        key = settings.get("jev_key") or ""
+        import wiki_jev
+        say("write", f"Jev is checking whether {len(asking_jev)} overviews still hold")
+
+        def judge(rel):
+            body = split_frontmatter(read(rel))[1]
+            return jev_holds(wiki.pages.get(rel, {}).get("title") or rel, LP.block_section(body, "Overview"),
+                             basis[rel]["ctx"], contexts[rel], key)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=wiki_jev.PARALLEL) as pool:
+            for rel, p in zip(asking_jev, pool.map(judge, asking_jev)):
+                gate[rel] = ("skip", "jev") if p is not None and p >= settings["jevBar"] else ("write", "jev says rewrite")
+    asked = [(rel, kind) for rel, kind in items if gate.get(rel, ("",))[0] == "write"]
+    for rel, (g, why) in gate.items():
+        if g == "skip":
+            counts[why] += 1
     ready, stopped = {}, False
     if Run.cap and isinstance(model, ClaudeModel) and model.claude.spent() >= Run.cap:
         log(f"overviews left as they are: the batch reached its spending cap (${Run.cap:g})")
         stopped = True
-    elif Run.lanes > 1:
-        asked = [(rel, kind) for rel, kind in items if contexts[rel]]
+    elif Run.lanes > 1 and asked:
         say("write", f"Claude is writing the overviews of {len(asked)} pages, {Run.lanes} at a time")
         with concurrent.futures.ThreadPoolExecutor(max_workers=Run.lanes) as pool:
             futs = {pool.submit(overview_for, model, sysmsg, wiki, rel, kind,
@@ -2841,29 +3204,52 @@ def refresh(model, wiki, claims, sysmsg, touched):
                 except Exception as e:
                     log(f"overview of {rel} skipped: {e}")
                 say("write", "writing the page overviews", n=n, of=len(asked))
-    for n, (rel, kind) in enumerate(items, 1):
-        title = wiki.pages.get(rel, {}).get("title") or rel
-        ctx = contexts[rel]
-        overview = ready.get(rel)
-        if ctx and Run.lanes <= 1 and not stopped:
-            say("write", f"writing the overview of {clean_line(title, 50)}", n=n, of=len(items))
-            model.deadline = time.time() + Run.prose_budget
+    changed_basis = False
+    try:
+        for n, (rel, kind) in enumerate(items, 1):
+            title = wiki.pages.get(rel, {}).get("title") or rel
+            ctx = contexts[rel]
+            overview = ready.get(rel)
+            wanted = gate.get(rel, ("",))[0] == "write"
+            if wanted and Run.lanes <= 1 and not stopped:
+                say("write", f"writing the overview of {clean_line(title, 50)}", n=n, of=len(items))
+                model.deadline = time.time() + Run.prose_budget
+                try:
+                    overview = overview_for(model, sysmsg, wiki, rel, kind, title, ctx)
+                except (ModelUnavailable, DocTimeout) as e:
+                    log(f"overviews stopped: {e}")
+                    break
+                except Exception as e:
+                    log(f"overview of {rel} skipped: {e}")
+                finally:
+                    model.deadline = None
+            if wanted:
+                counts["written" if overview else "failed"] += 1
+            fm, body = split_frontmatter(read(rel))
+            content = topic_block(wiki, claims, rel, overview) if kind == "topic" else entity_block(wiki, claims, rel, overview)
+            engine_page = wiki.pages.get(rel, {}).get("engine")
+            new_body, outcome = LP.put_block(body, content, "top" if (kind != "topic" or engine_page) else "end")
+            if outcome == "written":
+                write(rel, ("---\n" + fm.strip("\n") + "\n---\n" if fm else "") + new_body)
+                page_event(rel, False, wiki)
+            if overview and outcome in ("written", "unchanged"):
+                try:
+                    basis[rel] = overview_basis(wiki, claims, rel, kind, ctx)
+                    changed_basis = True
+                except Exception as e:
+                    log(f"overview basis of {rel} not kept: {e}")
+    finally:
+        if changed_basis:
             try:
-                overview = overview_for(model, sysmsg, wiki, rel, kind, title, ctx)
-            except (ModelUnavailable, DocTimeout) as e:
-                log(f"overviews stopped: {e}")
-                break
-            except Exception as e:
-                log(f"overview of {rel} skipped: {e}")
-            finally:
-                model.deadline = None
-        fm, body = split_frontmatter(read(rel))
-        content = topic_block(wiki, claims, rel, overview) if kind == "topic" else entity_block(wiki, claims, rel, overview)
-        engine_page = wiki.pages.get(rel, {}).get("engine")
-        new_body, outcome = LP.put_block(body, content, "top" if (kind != "topic" or engine_page) else "end")
-        if outcome == "written":
-            write(rel, ("---\n" + fm.strip("\n") + "\n---\n" if fm else "") + new_body)
-            page_event(rel, False, wiki)
+                save_basis(basis)
+            except OSError as e:
+                log(f"could not keep {OVERVIEW_BASIS}: {e}")
+        skipped = counts["edited"] + counts["unchanged"] + counts["immaterial"] + counts["jev"]
+        Run.overview_counts = counts
+        if gate:
+            log(f"overviews: {counts['written']} written, {skipped} skipped (edited {counts['edited']}, "
+                f"unchanged {counts['unchanged']}, immaterial {counts['immaterial']}, jev {counts['jev']}), "
+                f"{counts['failed']} failed")
 
 
 def at_a_glance(wiki, claims):
@@ -3001,6 +3387,8 @@ def run(server=None, only_docs=None, packets_only=False, reader="local", tried_p
     Run.prose_budget = float(cfg.get("proseBudgetSeconds") or PROSE_BUDGET_SECONDS)
     sysmsg = system_prompt(house_rules())
     Run.reader = reader
+    Run.overviews = overview_settings(config)
+    Run.routing, Run.routed = {}, {}
     if reader == "claude":
         # The fast pipeline: settings under "fast" in wiki.config.json; by default Claude
         # reads three documents for every batch the classic path would read at once (the
@@ -3025,6 +3413,28 @@ def run(server=None, only_docs=None, packets_only=False, reader="local", tried_p
         Run.cap = float(figures["maxSpendPerBatchUsd"])
         chosen = str(fast.get("model") or "sonnet")   # "default": whatever Claude itself defaults to
         model = ClaudeModel({"model": "" if chosen == "default" else chosen, "budget": min(Run.cap, 2.5)})
+        # Optional, per kind of call: the overviews' own model ("overviewModel", e.g. "haiku"),
+        # an effort for the reading and for the overviews ("effort", "overviewEffort": low,
+        # medium, high, ...; none: Claude's default), and the reading instructions in the
+        # system prompt so that Claude can cache them ("cacheInstructions"). The models and
+        # efforts are off by default: each changes what Claude writes, so it is turned on once a
+        # gold-set run shows it holds. The cached instructions are on (false turns them off): a
+        # real gold-set run read the same with them, for about a tenth less.
+        Run.models = {"overview": str(fast["overviewModel"])} if fast.get("overviewModel") else {}
+        Run.efforts = {k: str(fast[f]) for k, f in (("read", "effort"), ("overview", "overviewEffort"))
+                       if fast.get(f) in ("low", "medium", "high", "xhigh", "max")}
+        Run.instructions_in_system = fast.get("cacheInstructions") is not False
+        Run.routing = routing_settings(fast, config)
+        if Run.routing["enabled"]:
+            # The lighter reader's model; a thin answer is read again with the reader's own
+            # model and effort.
+            Run.models["read-fast"] = Run.routing["fastModel"]
+            if "read" in Run.efforts:
+                Run.efforts["reread"] = Run.efforts["read"]
+            log("choosing a reader for each document: the lighter one (" + Run.routing["fastModel"] + ") "
+                + ("where code or Jev finds it can" if Run.routing["jev_key"] else "where code finds it can"))
+        else:
+            Run.routing = {}
         if Run.company:
             sysmsg += (f"\n\nThis wiki belongs to {Run.company}: when a document names it, that is the "
                        "business itself.")
@@ -3083,15 +3493,21 @@ def run(server=None, only_docs=None, packets_only=False, reader="local", tried_p
         claims.save()
     stats = model.stats
     secs = round(time.time() - t0)
+    oc = Run.overview_counts
+    overviews = (f", overviews {oc['written']} written, "
+                 f"{oc['edited'] + oc['unchanged'] + oc['immaterial'] + oc['jev']} skipped" if oc else "")
     if reader == "claude":
         wiki_events.emit("claude-end", label=label_, ok=True, turns=stats["calls"],
                          cost=round(stats["cost"], 4) if stats["costed"] else None,
                          detail=f"{secs}s, {stats['calls']} Claude calls, {Run.lanes} at a time"
-                                + (f", {stats['failed']} failed" if stats["failed"] else ""))
+                                + (f", {stats['failed']} failed" if stats["failed"] else "") + overviews)
+        log(f"Claude's calls: {model.claude.summary()}")
+        if Run.routing:
+            log(f"routing: {routing_summary()}")
     else:
         wiki_events.emit("claude-end", label=label_, ok=True, turns=stats["calls"], cost=0,
                          detail=f"{secs}s, {stats['prompt_tokens']} tokens read, "
-                                f"{stats['completion_tokens']} written")
+                                f"{stats['completion_tokens']} written" + overviews)
     log(f"done in {secs}s: {stats}")
     return 0 if ok else 1
 
