@@ -34,7 +34,9 @@
 #      it got to), with a review item the owner (or Jev) answers on the Upload page
 #      (scripts/wiki_review.py);
 #   7. records newly filed documents in archive/ingestion-ledger.csv, tidies
-#      frontmatter, refreshes the ingestion register;
+#      frontmatter, sorts pages into the site's menu (scripts/wiki_menu.py: by rules, and
+#      with Claude reading, Claude places once each page the rules could not), refreshes
+#      the ingestion register;
 #   8. commits the change to the folder's local git history (never pushed anywhere);
 #   9. rebuilds the local site into public/ and shows a notification;
 #  10. starts again at once (a few times at most) if files arrived meanwhile, or a
@@ -102,6 +104,7 @@ LOCAL_STALL_SECONDS="${WIKI_LOCAL_STALL_SECONDS:-1200}"        # no sign of prog
 CONVERT_STALL_SECONDS="${WIKI_CONVERT_STALL_SECONDS:-1800}"    # a conversion with no sign of progress
 ERROR_NOTIFY_EVERY_SECONDS="${WIKI_ERROR_NOTIFY_EVERY_SECONDS:-21600}"
 BUILD_TIMEOUT_SECONDS="${WIKI_BUILD_TIMEOUT_SECONDS:-1800}"    # one site rebuild
+MENU_TIMEOUT_SECONDS="${WIKI_MENU_TIMEOUT_SECONDS:-1800}"      # Claude placing pages in the menu
 KEYCHAIN_SECONDS="${WIKI_KEYCHAIN_SECONDS:-20}"                # one Keychain lookup
 
 ALLOWED_TOOLS="Read,Glob,Grep,Edit,Write,Bash(mv *),Bash(mkdir *),Bash(ls *)"
@@ -244,7 +247,7 @@ stop_background() {
   for e in ${running:-}; do
     p=${e%%:*}; kill_tree "$p"
   done
-  for p in ${CONVERTER:-} ${BUILDER:-} ${AWAKE:-}; do kill_tree "$p"; done
+  for p in ${CONVERTER:-} ${BUILDER:-} ${MENU:-} ${AWAKE:-}; do kill_tree "$p"; done
 }
 # However a run ends, the live line must not keep describing a step that stopped.
 finish_run() { stop_background; nowp idle; release_lock; }
@@ -746,10 +749,34 @@ confirm_done() { # before-snapshot after-snapshot
 tidy() {
   nowp tidy detail="checking page headers and the ingestion register"
   "$PY" scripts/lint_frontmatter.py >> "$LOG_FILE" 2>&1 || log "lint_frontmatter failed"
+  # Every page the rules can place takes its place in the site's menu (never fatal).
+  "$PY" scripts/wiki_menu.py label >> "$LOG_FILE" 2>&1 || log "sorting the pages into the menu failed"
   "$PY" scripts/build_ingestion_register.py >> "$LOG_FILE" 2>&1 || log "ingestion register failed"
   # Folders dropped into Intake leave empty shells behind once their files are filed.
   find raw/_intake -mindepth 1 -type d -empty -delete 2>/dev/null || true
   "$PY" scripts/wiki_review.py tidy >> "$LOG_FILE" 2>&1 || true
+}
+
+# The pages the menu's rules could not place (those of a wiki older than the menu), placed
+# by Claude, once each, when the wiki reads with Claude. Claude unable to run is not tried
+# again for 6 hours (scripts/wiki_menu.py says when there is something to do).
+MENU=""
+menu_wanted() { [ "$ENGINE" != local ] && "$PY" scripts/wiki_menu.py pending 2>> "$LOG_FILE"; }
+menu_ask() { # [--yield]: stop between Claude's calls when a document or packet arrives
+  local rc
+  nowp tidy detail="sorting existing pages into the menu"
+  export CLAUDE_BIN
+  "$PY" scripts/wiki_menu.py ask "$@" >> "$LOG_FILE" 2>&1 &
+  MENU=$!
+  wait_at_most "$MENU" "$MENU_TIMEOUT_SECONDS"; rc=$?
+  MENU=""
+  case "$rc" in
+    0) ;;
+    124) log "sorting pages into the menu stopped: it took longer than ${MENU_TIMEOUT_SECONDS}s; trying again in 6 hours"
+         date +%s > "$STATE_DIR/menu-ask-failed" ;;
+    *) log "sorting pages into the menu failed (exit $rc)" ;;
+  esac
+  return 0
 }
 
 commit_changes() { # message
@@ -854,6 +881,10 @@ case "${PREV_NOW:-idle}" in
 esac
 # Wikis from before the performance modes move to them once (it does nothing after that).
 "$PY" scripts/wiki_settings.py migrate >> "$LOG_FILE" 2>&1 || log "the settings could not be moved to the performance modes"
+# A wiki's pages take their places in the site's menu once per version of engine/menu.json,
+# so an updated wiki shows them there from its first rebuild (every run's tidy step keeps
+# them up to date after that).
+"$PY" scripts/wiki_menu.py label --once >> "$LOG_FILE" 2>&1 || log "the pages could not be sorted into the menu"
 refresh_starter_pages
 
 if [ "$REBUILD_ONLY" = 1 ]; then
@@ -877,7 +908,23 @@ mkdir -p raw/inbox raw/_intake archive/inbox review/open review/done actions/ope
 route_misfiled
 
 if [ -z "$(list_pending raw/_intake)$(list_pending raw/inbox)" ]; then
-  # Nothing to do. Make sure there is a site to look at, then stop quietly.
+  # Nothing to do. Pages the menu's rules could not place go to Claude now (each once), and
+  # the site is rebuilt to show them. Files dropped meanwhile come first: the pass stops
+  # between Claude's calls, and a run starts at once (it rebuilds the site as it ends).
+  ENGINE=$(config_value engine claude)
+  if menu_wanted; then
+    AWAKE=""
+    if command -v caffeinate >/dev/null 2>&1; then caffeinate -i -w $$ >/dev/null 2>&1 & AWAKE=$!; fi
+    load_credentials
+    menu_ask --yield
+    commit_changes "wiki: $(date +%F) pages sorted into the menu"
+    if [ -n "$(list_pending raw/_intake)$(list_pending raw/inbox)" ] && [ "${WIKI_RERUN_DEPTH:-0}" -lt "$MAX_RERUNS" ]; then
+      rerun_now
+    fi
+    build_site
+    exit 0
+  fi
+  # Make sure there is a site to look at, then stop quietly.
   [ -f public/index.html ] || build_site
   exit 0
 fi
@@ -1272,6 +1319,8 @@ printf '%s' "$STOP" > "$STATE_DIR/last-stop"   # the next run's working notice d
 snapshot_filed_sources > "$SNAP_AFTER"
 append_ledger "$SNAP_BEFORE" "$SNAP_AFTER" "$RUN_ID"
 tidy
+# Pages the menu's rules could not place, placed by Claude (credentials are loaded).
+[ "$CLAUDE_OK" = 1 ] && menu_wanted && menu_ask
 
 # Count what was actually filed and archived, not what left the queue: a parked
 # file leaves too, and must not be reported as done.

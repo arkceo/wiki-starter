@@ -1,9 +1,38 @@
 import { PageLayout, SharedLayout } from "./quartz/cfg"
 import * as Component from "./quartz/components"
+import menu from "./engine/menu.json"
 
+// The left menu: the sections and categories of engine/menu.json above the folders. A page
+// appears under each "section/category" its frontmatter `menu:` lists; titles only, since
+// the hints are for whoever files the pages.
 const explorer = () =>
   Component.Explorer({
+    menu: menu.sections.map(({ key, title, categories }) => ({
+      key,
+      title,
+      categories: categories.map(({ key, title }) => ({ key, title })),
+    })),
     filterFn: (node) => !["tags", "_review"].includes(node.slugSegment),
+    // A folder with no index page of its own shows a readable name rather than its folder
+    // name. Rebuilt in the browser from its text, so it uses nothing from outside itself.
+    mapFn: (node) => {
+      const folder = node.slugSegment
+      if (!node.isFolder || !folder || node.displayName !== folder) return
+      const names: Record<string, string> = {
+        sources: "Documents",
+        companies: "Companies and people",
+        "finance-legal": "Finance and legal",
+        "how-it-runs": "How it runs",
+        decisions: "Decisions",
+        products: "Products",
+        projects: "Projects",
+        updates: "Updates",
+      }
+      const plain = folder.replace(/-/g, " ")
+      node.displayName = Object.prototype.hasOwnProperty.call(names, folder)
+        ? names[folder]
+        : plain.charAt(0).toUpperCase() + plain.slice(1)
+    },
     sortFn: (a, b) => {
       const pin = "ingestion-register"
       if (a.slugSegment === pin) return -1
@@ -67,7 +96,10 @@ export const defaultListPageLayout: PageLayout = {
     Component.PageTitle(),
     Component.MobileOnly(Component.Spacer()),
     Component.Flex({
-      components: [{ Component: Component.Search(), grow: true }, { Component: Component.Darkmode() }],
+      components: [
+        { Component: Component.Search(), grow: true },
+        { Component: Component.Darkmode() },
+      ],
     }),
     explorer(),
   ],

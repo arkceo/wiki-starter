@@ -31,6 +31,29 @@ pictures, so a receipt photographed on a phone is read properly, and a photo wit
 words in it gets a page saying what it shows and when it was taken. People are
 described, never named from their face, and a photo's location is never read.
 
+## The menu
+
+The menu on the left sorts the wiki into sections: **Company Profile**, **Marketing**,
+**Sales**, **Customer Service**, **Human Resources**, **Operation**, **Legal**,
+**Account** and **Finance**, each with its categories. Company Profile holds the business
+itself (with its directors and shareholders) and everyone it deals with: employees,
+contractors, customers, suppliers, its company secretary, accountant, auditor, tax agent
+and lawyer, government bodies, banks and financiers, landlords and insurers. Only
+sections and categories that have pages show, and each can be folded away.
+
+The menu is only a way in: pages stay where they are, under `companies/`, `sources/`,
+`finance-legal/` and so on, and a page can sit in several categories at once (a firm that
+is both your accountant and your tax agent shows under both). Each page says where it
+belongs in a `menu:` line at its top, set when its document is read, from what the
+document says about each company and person. The wiki only ever adds the categories it
+can tell from the documents. To place a page yourself, edit that line and add
+`menu_auto: false` below it: the wiki then leaves the page's line as you set it.
+Products, projects, decisions and updates keep their own groups below the sections.
+
+An employee's page holds their details as the documents give them (IC or passport number,
+EPF and SOCSO numbers, address, phone, date of birth, salary), so they can be looked up.
+Anyone who can open the wiki on this Mac can see them.
+
 ## Questions for you: the Review tab
 
 When something needs a decision (two documents disagree, a fact is uncertain, or a file
@@ -98,8 +121,9 @@ Two background agents start when you log in:
      [[_review|Review queue]] with both values. Then the packets, five at a time with
      Claude (one page each under `updates/` or `decisions/`). With the model on this
      Mac, Claude is never started and nothing leaves the Mac;
-  3. tidies frontmatter, refreshes the [[ingestion-register]] and commits the change to
-     the folder's local history (git, on this Mac only);
+  3. tidies frontmatter, sorts new pages into the menu (`scripts/wiki_menu.py`; the
+     sections are in `engine/menu.json`), refreshes the [[ingestion-register]] and commits
+     the change to the folder's local history (git, on this Mac only);
   4. rebuilds the site and shows a notification. Open wiki pages show the new version
      by themselves (a page you are reading offers a button instead of jumping).
 - **The viewer** (`scripts/wiki_server.py`) serves the site at `http://127.0.0.1:8765`

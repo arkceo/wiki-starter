@@ -158,6 +158,13 @@ button.desktop-explorer {
     padding-left: 0.8rem;
     border-left: 1px solid var(--lightgray);
   }
+
+  // The menu's sections come first; a thin rule sets the folder groups below them apart.
+  ul.explorer-ul > li.menu-branch + li:not(.menu-branch):not(.overflow-end) {
+    margin-top: 0.4rem;
+    padding-top: 0.4rem;
+    border-top: 1px solid var(--lightgray);
+  }
 }
 
 .folder-container {

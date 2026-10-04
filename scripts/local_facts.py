@@ -29,30 +29,37 @@ import unicodedata
 
 ATTRIBUTES = [
     "payment_terms", "unit_price", "fee", "rent", "deposit", "credit_limit", "total_amount", "amount",
-    "quantity", "percentage", "rate", "tax", "revenue", "budget",
+    "quantity", "percentage", "rate", "tax", "revenue", "budget", "salary",
     "date", "start_date", "end_date", "due_date", "deadline", "contract_term", "notice_period",
-    "address", "delivery_terms", "warranty", "headcount", "reference", "other",
+    "date_of_birth", "address", "phone", "email", "delivery_terms", "warranty", "headcount", "reference", "other",
 ]
 LABELS = {"payment_terms": "Payment terms", "unit_price": "Unit price", "credit_limit": "Credit limit",
           "total_amount": "Total amount", "start_date": "Start date", "end_date": "End date",
           "due_date": "Due date", "contract_term": "Contract term", "notice_period": "Notice period",
-          "delivery_terms": "Delivery terms"}
+          "delivery_terms": "Delivery terms", "salary": "Salary", "date_of_birth": "Date of birth",
+          "phone": "Phone", "email": "Email"}
 # Terms that stay true until something changes them: a later source that states one
-# differently is a contradiction to look at.
+# differently is a contradiction to look at. (A salary is not one: a raise is no
+# contradiction.)
 COMPARED = {"payment_terms", "unit_price", "fee", "rent", "deposit", "credit_limit", "contract_term",
-            "notice_period", "address", "delivery_terms", "warranty"}
+            "notice_period", "address", "delivery_terms", "warranty", "date_of_birth"}
+# Shown as one fact, its current value with the one before: the standing terms, and a
+# salary (a raise shows as the new salary with the old one, and never as a contradiction).
+GROUPED = COMPARED | {"salary"}
 # One value per pair of parties, however it is described ("30 days from invoice date" and
 # "invoice payment" are the same payment term).
 SINGLE = {"payment_terms", "credit_limit"}
-# What a company, person or product page holds: standing terms and figures about it. One-off
-# amounts, dates and references of a transaction stay on its document's summary page.
+# What a company, person or product page holds: standing terms and figures about it, and a
+# person's own details (salary, date of birth, phone, email: an employee's page keeps them
+# all). One-off amounts, dates and references of a transaction stay on its document's
+# summary page.
 STANDING = COMPARED | {"unit_price", "rate", "percentage", "revenue", "budget", "headcount", "start_date",
-                       "end_date", "contract_term", "tax"}
+                       "end_date", "contract_term", "tax", "salary", "date_of_birth", "phone", "email"}
 # Terms between two parties: recorded on both parties' pages, each naming the other.
-RELATIONAL = COMPARED - {"address"}
+RELATIONAL = COMPARED - {"address", "date_of_birth"}
 DURATION = {"payment_terms", "contract_term", "notice_period", "warranty"}
 MONEY = {"unit_price", "fee", "rent", "deposit", "credit_limit", "total_amount", "amount", "tax", "revenue",
-         "budget"}
+         "budget", "salary"}
 
 MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september",
           "october", "november", "december"]
@@ -237,7 +244,7 @@ def same_norm(a, b):
     return False
 
 
-DATES = {"date", "start_date", "end_date", "due_date", "deadline"}
+DATES = {"date", "start_date", "end_date", "due_date", "deadline", "date_of_birth"}
 PAY_WORDS = re.compile(r"\b(cod|cash|upfront|advance|immediate|immediately|on delivery|on receipt|on demand)\b", re.I)
 
 
@@ -558,9 +565,9 @@ class Claims:
         for r in sorted(self.for_page(page), key=self.order):
             # Two different figures of one document are two facts (a subtotal and a total),
             # never a value and the value it replaced.
-            g = self.best_group(r, [x for x in groups if x[0]["attribute"] in COMPARED and not any(
+            g = self.best_group(r, [x for x in groups if x[0]["attribute"] in GROUPED and not any(
                 y.get("source") == r.get("source") and not same_norm(y.get("norm"), r.get("norm"))
-                for y in x)]) if r["attribute"] in COMPARED else None
+                for y in x)]) if r["attribute"] in GROUPED else None
             if g is not None:
                 g.append(r)
             else:

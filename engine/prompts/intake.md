@@ -41,7 +41,9 @@ For each readable document:
 2. Summarise it into the right wiki page(s) per the filing rules in CLAUDE.md, creating
    or updating the relevant entity and concept pages with wikilinks. Cite the document by
    its FINAL path in `sources:`. Put recyclable identifiers in a `facts:` map; never guess
-   one.
+   one. Give every summary, topic, company and person page you write its `menu:` as
+   CLAUDE.md's Menu section says, and a government body one page, named as engine/menu.json
+   names it.
 3. Record any contradiction or uncertainty in wiki/_review.md instead of overwriting.
 4. Move the original document from raw/_intake/ into its project folder with a plain
    shell `mv` (use `mkdir -p` first if the folder is new). Never rename it.

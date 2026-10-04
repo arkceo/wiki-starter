@@ -69,6 +69,21 @@ lists them.
 
 - **Read the wiki:** double-click **Open Wiki** on the Desktop, or go to
   `http://127.0.0.1:8765`.
+- **The menu** on the left sorts the wiki into sections: Company Profile (the business
+  itself, its directors and shareholders, and everyone it deals with: employees,
+  contractors, customers, suppliers, company secretary, accountant, auditor, tax agent,
+  lawyer, government bodies, banks and financiers, landlords, insurers), then Marketing,
+  Sales, Customer Service, Human Resources, Operation, Legal, Account and Finance, each
+  with its categories. Only the parts that have pages show, and each folds away. The
+  menu is only a way in: pages keep their place in the folder, and one page can show
+  under several categories (a firm that is your accountant and your tax agent). Each page
+  says where it belongs in a `menu:` line at its top. The wiki only adds categories; to
+  place a page yourself, edit that line and add `menu_auto: false` under it. A wiki
+  from an earlier version is sorted once, by itself, after the update; with Claude, Claude
+  places the pages the rules cannot (titles and first lines only, under the spending cap).
+- **Employee pages** hold the person's details as the documents give them (IC or passport
+  number, EPF and SOCSO numbers, address, phone, date of birth, salary), for looking them
+  up. Anyone who can open the wiki on that Mac sees them.
 - **Add documents or notes:** click **Upload** at the top right of any wiki page. Drop in
   files, whole folders or Update Packets, or use **Choose files**. Your originals stay
   where they are.

@@ -106,9 +106,12 @@ import local_pages as LP  # noqa: E402
 import wiki_claude  # noqa: E402
 import wiki_review  # noqa: E402
 import wiki_events  # noqa: E402
+import wiki_menu  # noqa: E402
 import wiki_netguard  # noqa: E402
 import wiki_settings  # noqa: E402
-from local_pages import clean_line, esc, label, owner_text, raw_link, yq  # noqa: E402,F401
+from local_pages import (SUFFIX_ORIG_RE, SUFFIX_RE, SUFFIX_WORDS, _flow_items, _key_block,  # noqa: E402,F401
+                         clean_line, esc, fm_get, fm_list, fm_set, label, norm_full, owner_text,
+                         raw_link, same_entity, split_frontmatter, split_suffix, yq)
 
 CHUNK_CHARS = 18000          # about 5-6k tokens: leaves room for instructions and the answer
 MAX_PARTS = 24               # longer documents are summarised from their first parts
@@ -122,7 +125,8 @@ DOC_TYPES = ["contract", "agreement", "invoice", "quotation", "purchase-order", 
              "statement", "report", "minutes", "letter", "email", "policy", "procedure",
              "form", "presentation", "spreadsheet", "brochure", "certificate", "other"]
 ID_KINDS = ["registered_name", "registration_no", "tin_no", "sst_no", "licence_no",
-            "bank_account"]
+            "bank_account", "id_no", "epf_no", "socso_no"]
+PERSON_IDS = {"id_no", "epf_no", "socso_no"}   # a person's identity card or passport, EPF, SOCSO
 
 
 class ModelUnavailable(Exception):
@@ -150,31 +154,6 @@ def slugify(text, limit=60):
     return t
 
 
-SUFFIX_WORDS = ("sdn bhd", "berhad", "bhd", "pte ltd", "pte", "ltd", "limited", "inc", "llc",
-                "llp", "plc", "corp", "corporation", "company", "co", "gmbh", "ag", "sa", "pty ltd",
-                "pty")
-SUFFIX_RE = re.compile(r"(?:\s+(?:" + "|".join(re.escape(w) for w in SUFFIX_WORDS) + r"))+\s*$")
-# The same suffixes as written ("Sdn. Bhd.", ", Inc."), to derive the short alias.
-SUFFIX_ORIG_RE = re.compile(r"(?:[\s,]+(?:" + "|".join(w.replace(" ", r"\.?\s*") + r"\.?" for w in SUFFIX_WORDS)
-                            + r"))+\s*$", re.I)
-
-
-def norm_full(name):
-    """Casefolded words, any script, punctuation dropped."""
-    n = unicodedata.normalize("NFKC", str(name or "")).casefold().replace("&", " and ")
-    return " ".join(re.sub(r"[\W_]+", " ", n).split())
-
-
-def split_suffix(name):
-    """('northwind trading', 'sdn bhd') for 'Northwind Trading Sdn. Bhd.'"""
-    full = norm_full(name)
-    m = SUFFIX_RE.search(" " + full)
-    if not m:
-        return full, ""
-    core = (" " + full)[: m.start()].strip()
-    return (core, m.group(0).strip()) if core else (full, "")
-
-
 def share_a_row(a, b, text):
     """In a table each row is one record. Two parties are linked from a table only by a row
     that names both, when either is named only in rows: a ledger's catering line for one
@@ -187,126 +166,9 @@ def share_a_row(a, b, text):
     return any(t and ka in l and kb in l for t, l in lines)
 
 
-def same_entity(a, b):
-    """Two names for one company: identical, or the same core where at most one carries
-    a legal suffix ('Northwind Trading' and 'Northwind Trading Sdn Bhd'). Different
-    suffixes ('... Sdn Bhd' and '... Pte Ltd') are different companies."""
-    if not a or not b:
-        return False
-    fa, fb = norm_full(a), norm_full(b)
-    if fa and fa == fb:
-        return True
-    (ca, sa), (cb, sb) = split_suffix(a), split_suffix(b)
-    return bool(ca) and ca == cb and (not sa or not sb)
-
-
 # ================================================================ frontmatter ====
-def split_frontmatter(text):
-    if text.startswith("---\n"):
-        end = text.find("\n---", 4)
-        if end != -1:
-            nl = text.find("\n", end + 4)
-            return text[4:end], text[(nl + 1) if nl != -1 else len(text):]
-    return "", text
-
-
-def _key_block(fm, key):
-    """(start, end, first-line value) of a top-level key and its continuation lines."""
-    m = re.search(rf"^{re.escape(key)}:[ \t]*(.*)$", fm, re.M)
-    if not m:
-        return None
-    end = m.end()
-    for line in fm[m.end():].split("\n")[1:]:
-        if re.match(r"^([ \t]+\S|-[ \t]|-$)", line):
-            end += 1 + len(line)
-        else:
-            break
-    return m.start(), end, m.group(1).strip()
-
-
-def _flow_items(inner):
-    """Items of a YAML flow list body, honouring quotes (a comma inside "..." stays)."""
-    items, cur, q, i = [], "", None, 0
-    while i < len(inner):
-        ch = inner[i]
-        if q:
-            if ch == "\\" and q == '"' and i + 1 < len(inner):
-                cur += ch + inner[i + 1]
-                i += 2
-                continue
-            cur += ch
-            if ch == q:
-                q = None
-        elif ch in "\"'":
-            q = ch
-            cur += ch
-        elif ch == ",":
-            items.append(cur)
-            cur = ""
-        else:
-            cur += ch
-        i += 1
-    items.append(cur)
-    out = []
-    for it in items:
-        it = it.strip()
-        if not it:
-            continue
-        if it[0] == '"' and it[-1:] == '"':
-            try:
-                it = json.loads(it)
-            except ValueError:
-                it = it[1:-1]
-        elif it[0] == "'" and it[-1:] == "'":
-            it = it[1:-1].replace("''", "'")
-        out.append(it)
-    return out
-
-
-def fm_list(fm, key):
-    """A list value in any common shape: [a, "b, c"], block items (indented or not), or a
-    single scalar. None when the shape is not a list of plain values (left alone)."""
-    blk = _key_block(fm, key)
-    if blk is None:
-        return []
-    start, end, first = blk
-    if first.startswith("["):
-        if not first.endswith("]"):
-            return None
-        return _flow_items(first[1:-1])
-    rest = fm[start:end].split("\n")[1:]
-    if not first:
-        items = []
-        for line in rest:
-            m = re.match(r"^[ \t]*-[ \t]*(.*)$", line)
-            if not m:
-                return None  # a nested map or multi-line value: not ours to rewrite
-            items += _flow_items(m.group(1)) if m.group(1) else []
-        return items
-    if rest or first.startswith(("{", "|", ">")):
-        return None
-    return _flow_items(first)
-
-
-def fm_get(fm, key):
-    blk = _key_block(fm, key)
-    if not blk:
-        return ""
-    v = blk[2]
-    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
-        items = _flow_items(v)
-        return items[0] if items else ""
-    return v
-
-
-def fm_set(fm, key, line):
-    """Replace a top-level key's whole entry (with its continuation lines), or add it."""
-    blk = _key_block(fm, key)
-    if blk:
-        return fm[: blk[0]] + line + fm[blk[1]:]
-    return fm.rstrip("\n") + "\n" + line
-
-
+# Reading frontmatter (split_frontmatter, fm_list, fm_get, fm_set) is in local_pages.py,
+# shared with scripts/wiki_menu.py.
 def touch_page(path, add_source=None, status=None):
     """Update `updated:` (and optionally sources/status) in an existing page's frontmatter."""
     text = read(path)
@@ -332,9 +194,16 @@ def write(path, text):
     full = os.path.join(WIKI_DIR, path)
     os.makedirs(os.path.dirname(full), exist_ok=True)
     tmp = full + ".local-tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(text)
-    os.replace(tmp, full)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, full)
+    except BaseException:   # a full disk or a signal leaves no half-written copy behind
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def append_under(path, heading, lines):
@@ -624,33 +493,12 @@ def text(n):
 
 
 KINDS = ["company", "person", "product", "place", "other"]
-# The topic pages a small business usually keeps. A document adds to these (or to topic
-# pages the wiki already has); a new topic is proposed only when none fits, so the same
-# subject never ends up spread over pages named after single documents.
-TOPICS = [
-    ("finance-legal", "Sales and service tax (SST)"),
-    ("finance-legal", "Income tax and the tax agent"),
-    ("finance-legal", "Supplier contracts and terms"),
-    ("finance-legal", "Customer contracts and terms"),
-    ("finance-legal", "Banking and bank reconciliations"),
-    ("finance-legal", "Payroll and statutory contributions"),
-    ("finance-legal", "Premises and leases"),
-    ("finance-legal", "Insurance"),
-    ("finance-legal", "Loans and financing"),
-    ("finance-legal", "Invoicing and receivables"),
-    ("finance-legal", "Purchasing and payables"),
-    ("finance-legal", "Licences, permits and registrations"),
-    ("finance-legal", "Board and company secretarial"),
-    ("finance-legal", "Financial results and budgets"),
-    ("how-it-runs", "Month-end close"),
-    ("how-it-runs", "Stock and inventory counts"),
-    ("how-it-runs", "Approving payments"),
-    ("how-it-runs", "Expansion and new outlets"),
-    ("how-it-runs", "Staff, roles and rostering"),
-    ("how-it-runs", "Quality and supplier performance"),
-    ("how-it-runs", "Customer service"),
-    ("how-it-runs", "Equipment and maintenance"),
-]
+# The topic pages a small business usually keeps: (section, title, its place in the wiki's
+# menu). A document adds to these (or to topic pages the wiki already has); a new topic is
+# proposed only when none fits, so the same subject never ends up spread over pages named
+# after single documents. The list is kept in scripts/wiki_menu.py, whose rules place
+# these pages by their titles.
+TOPICS = wiki_menu.STARTER_TOPICS
 DECISION_TYPES = {"minutes", "letter", "email", "policy", "procedure", "report", "presentation", "other"}
 DECISION_CUE = re.compile(r"\b(resolved|resolution|decided|decision|approved|agreed to|agreed that|will proceed)\b", re.I)
 SEED_PAGES = {"index", "how-this-wiki-works", "raw-to-markdown-conversion"}
@@ -705,6 +553,7 @@ def topics_schema(choices, proj_list):
         "title": text(80), "points": S("array", items=text(240), maxItems=4)}))}
     if len(proj_list) > 1:
         props["project"] = S("string", enum=proj_list)
+    props.update(menu_field())
     return obj(props)
 
 
@@ -730,13 +579,13 @@ Q_PARTIES = (
     "bought.")
 Q_FIGURES = (
     "List every figure this document states: amounts, prices, fees, quantities, percentages, "
-    "dates, deadlines, durations and periods, rates, and addresses. One entry per figure, "
-    "including table rows. For each:\n"
+    "dates, deadlines, durations and periods, rates, and addresses, and a person's salary, date of "
+    "birth, phone number and email. One entry per figure, including table rows. For each:\n"
     "- about: whom or what the figure describes, from this list: {names}; or \"this document\" "
     "for the document's own numbers, totals and dates;\n"
     "- attribute: what kind of figure it is. payment_terms is only the time a buyer has to pay; "
     "a notice to end or change something is notice_period; how long an agreement runs is "
-    "contract_term; a charge for a service is fee;\n"
+    "contract_term; a charge for a service is fee; a person's pay is salary;\n"
     "- qualifier: a few words saying exactly what it is for, e.g. \"washed arabica coffee beans\", "
     "\"annual tax compliance\", \"price revision notice\", \"Q1 2026\";\n"
     "- value: copied exactly as written, with its currency or unit.")
@@ -746,8 +595,9 @@ Q_SHORT = ("What payment terms, prices, fees, quantities, periods, dates, rates 
            "give{about}? List each one, with what it is for.")
 Q_IDS = (
     "List the identifiers this document gives for {names}: registered names, company or "
-    "registration numbers, tax numbers (TIN, SST, GST), licence numbers and bank account numbers. "
-    "Copy each value exactly as written. Leave the list empty if there are none.")
+    "registration numbers, tax numbers (TIN, SST, GST), licence numbers, bank account numbers, and a "
+    "person's identity card (IC, NRIC, MyKad) or passport number and EPF (KWSP) and SOCSO (PERKESO) "
+    "numbers. Copy each value exactly as written. Leave the list empty if there are none.")
 
 
 def system_prompt(house_rules):
@@ -1012,8 +862,15 @@ def clean_name(name):
 
 
 PRODUCT_NOISE = re.compile(r"\b(deliver(?:y|ies)|orders?|shipments?|purchases?|consignments?|batch(?:es)?)\b", re.I)
-PERSON_NAME = re.compile(r"(?:[A-Z][a-z'’.-]+|bin|binti|bte|a/l|a/p|van|de|[A-Z]\.)(?:\s+(?:[A-Z][a-z'’.-]+|bin|binti|bte|"
-                         r"a/l|a/p|van|de|[A-Z]\.)){1,5}")
+# A person's name, as a reader's "person" must look to get a page: two to eight words, each
+# capitalised ("Siew-Ling", "O'Brien", "McDonald"), a surname in capitals ("TAN Ah Kow"),
+# an initial, or a link ("Muthu A/L Raman", "Siti binti Ali", "Nurul Aina bt. Rahman",
+# "Mohd Rizal B Ahmad", "Abdullah @ Ah Kow"), with a given name after a comma ("Chong Wei
+# Liang, Jason"). "Directors", "Shift leads": a group.
+_NAME_LINK = r"(?i:bin|binti|bte?\.?|bt\.?|b\.?|a/l|a/p|s/o|d/o)|van|de|@"
+_NAME_WORD = (rf"(?:[A-Z](?:[a-z]{{1,2}}[A-Z]|['’][A-Z])?[a-z'’.]+(?:-[A-Za-z][a-z'’.]*)*|[A-Z]{{2,}}|[A-Z]\.|"
+              rf"{_NAME_LINK})")
+PERSON_NAME = re.compile(rf"{_NAME_WORD}(?:(?:\s+|,\s*){_NAME_WORD}){{1,7}}")
 
 
 def clean_parties(items):
@@ -1025,6 +882,8 @@ def clean_parties(items):
         kind = e.get("kind") if e.get("kind") in KINDS else "other"
         if kind in ("person", "other") and LEGAL_END.search(name):
             kind = "company"  # "... Sdn Bhd" is a company whatever the answer says
+        if kind == "other" and wiki_menu.government_page(name):
+            kind = "company"  # a government body the menu lists has a page, like a company
         if kind == "person" and not PERSON_NAME.fullmatch(name):
             kind = "other"  # "Directors", "Shift leads": a group, not a person with a page
         if kind == "product" and re.search(r"\d", name) and not re.search(r"[a-z]{3,}", name):
@@ -1071,9 +930,11 @@ def mentioned(name, names):
 
 
 def id_tokens(part):
-    """Identifier-like tokens with a label in front of them (registration, tax, bank...)."""
-    toks = re.findall(r"(?<![\w\-/])[A-Za-z]{0,4}\d[\w\-/]*\d(?:[ ]\d{3,})*(?:[ ]\(\w+-\w\))?", part)
-    return [t for t in dict.fromkeys(toks) if identifier_kind(t, part)]
+    """Identifier-like tokens with a label in front of them (registration, tax, bank...).
+    An identity card written with spaces is one token, not its first six digits."""
+    toks = re.findall(r"(?<![\w\-/])\d{6}[ -]\d{2}[ -]\d{4}(?![\w\-/])|"
+                      r"(?<![\w\-/])[A-Za-z]{0,4}\d[\w\-/]*\d(?:[ ]\d{3,})*(?:[ ]\(\w+-\w\))?", part)
+    return [t for t in dict.fromkeys(toks) if identifier_kind(t, part, wide=True)]
 
 
 def read_part(model, sysmsg, name, part, i, n, known):
@@ -1244,8 +1105,11 @@ ROLE_LINKS = [
     (r"\b(tax agent|accountant|auditor|advis[eo]r|consultant|lawyer|solicitor|company secretary)\b", "adviser_to", False),
     (r"\bbank\b", "bank_of", False),
 ]
-PERSON_LINKS = [(r"\bdirector\b", "director_of"), (r"\b(manager|officer|clerk|executive|staff|accountant|assistant)\b",
-                                                      "employee_of")]
+# A person's role in a document of the business alone: a director plainly called so is
+# one of its directors; a job title ("Sales Director", "manager") is one of its staff.
+PERSON_LINKS = [(lambda t: wiki_menu.plain_party_role(t) and re.search(r"director|pengarah", t, re.I), "director_of"),
+                (re.compile(r"\b(director|manager|officer|clerk|executive|staff|accountant|assistant)\b", re.I).search,
+                 "employee_of")]
 
 
 def role_relations(d):
@@ -1271,8 +1135,8 @@ def role_relations(d):
             for p in d["parties"]:
                 if p["kind"] != "person" or any(p["name"] in pair for pair in linked):
                     continue
-                for rx, relation in PERSON_LINKS:
-                    if re.search(rx, p["role"] or "", re.I):
+                for says, relation in PERSON_LINKS:
+                    if says(p["role"] or ""):
                         out.append({"subject": p["name"], "relation": relation, "object": own["name"]})
                         break
     sellers = [p for p in companies if re.search(r"\b(supplier|vendor|supplies|seller|sells)\b", p["role"] or "", re.I)]
@@ -1304,7 +1168,7 @@ def topic_choices(wiki):
     existing = wiki.topics()[:80]
     have = {slugify(t) for _, t in existing}
     choices = [(rel, t, rel.split("/")[1]) for rel, t in existing]
-    choices += [(None, t, sec) for sec, t in TOPICS if slugify(t) not in have
+    choices += [(None, t, sec) for sec, t, _ in TOPICS if slugify(t) not in have
                 and not topic_match(t, existing)]
     return existing, choices, list(dict.fromkeys(t for _, t, _ in choices))
 
@@ -1319,8 +1183,11 @@ def ask_topics(model, sysmsg, d, wiki, proj_list, pre):
          "title) only for a subject none of these covers and a business keeps one page on; never a page for this "
          "one document, a company, a person or a product. For each topic, give up to 4 short points from this "
          "document that belong on that page, each a full sentence that names what it is about."
-         + ("\n\nAlso choose its project folder: 'general' unless one clearly fits." if len(proj_list) > 1 else ""))
+         + ("\n\nAlso choose its project folder: 'general' unless one clearly fits." if len(proj_list) > 1 else "")
+         + ("\n\nAnd choose where this document belongs in the wiki's menu: one or two of these, most fitting "
+            "first.\n" + wiki_menu.listing(compact=True) if wiki_menu.PATHS else ""))
     a = ask_safe(model, sysmsg, q, topics_schema(titles, proj_list), 1200, "topics")
+    d["menu"] = wiki_menu.normalise(a.get("menu"))[:2]
     return settle_topics(a, d, wiki, existing, choices, proj_list)
 
 
@@ -1484,7 +1351,22 @@ def extract_schema(titles, proj_list):
                                          "points": S("array", items=text(240))})),
         "project": S("string", enum=proj_list),
         "photo": text(1500),
+        **menu_field(),
     })
+
+
+def menu_field():
+    """The reader's choice of where a document belongs in the wiki's menu (none when the
+    menu cannot be read: engine/menu.json)."""
+    return {"menu": S("array", items=S("string", enum=wiki_menu.PATHS), maxItems=2)} if wiki_menu.PATHS else {}
+
+
+def menu_question():
+    """The line asking for it, with the menu's categories (compact: one line a section)."""
+    if not wiki_menu.PATHS:
+        return ""
+    return ("- menu: where this document belongs in the wiki's menu: one or two of these (most fitting first):\n"
+            + wiki_menu.listing(compact=True) + "\n")
 
 
 Q_EXTRACT = """Read the whole document above and answer every part.
@@ -1492,14 +1374,14 @@ Q_EXTRACT = """Read the whole document above and answer every part.
 - title: as a reader would name it, with its number if it has one. doc_type. doc_date: YYYY-MM-DD, empty if it has none.
 - summary: up to 10 points that carry the key names, amounts and dates. decisions it records (a short title, the decision in one sentence, its date); obligations it sets (who must do what, by when); open_questions it leaves.
 - parties: every company, organisation, person and product or service it names, and each place that matters to the business (a site, an outlet, an office). The name exactly as written (a company's full legal name when the document gives it; a person's name without Mr or Ms), its kind, and its role in this document: supplier, buyer, customer, landlord, tax agent, director, signatory, contact, product bought, ...
-- figures: every amount, price, fee, quantity, percentage, date, deadline, duration, rate and address it states, one entry per figure, table rows included. about: one of your party names exactly as you wrote it, or "this document" for the document's own numbers, totals and dates. attribute: what kind of figure it is (payment_terms is only the time a buyer has to pay; a notice to end or change something is notice_period; how long an agreement runs is contract_term; a charge for a service is fee). qualifier: a few words saying exactly what it is for. value: copied exactly as written, with its currency or unit.
-- identifiers: registered names, company or registration numbers, tax numbers (TIN, SST, GST), licence numbers and bank account numbers: the party they belong to (entity: one of your party names) and the value copied exactly.
+- figures: every amount, price, fee, quantity, percentage, date, deadline, duration, rate and address it states, and a person's salary, date of birth, phone number and email, one entry per figure, table rows included. about: one of your party names exactly as you wrote it, or "this document" for the document's own numbers, totals and dates. attribute: what kind of figure it is (payment_terms is only the time a buyer has to pay; a notice to end or change something is notice_period; how long an agreement runs is contract_term; a charge for a service is fee; a person's pay is salary). qualifier: a few words saying exactly what it is for. value: copied exactly as written, with its currency or unit.
+- identifiers: registered names, company or registration numbers, tax numbers (TIN, SST, GST), licence numbers, bank account numbers, and a person's identity card (IC, NRIC, MyKad) or passport, EPF (KWSP) and SOCSO (PERKESO) numbers: the party they belong to (entity: one of your party names) and the value copied exactly.
 - relations: the relationships between your parties that the document states: a person's place at a company (director_of, employee_of, signatory_for, contact_for), how companies deal with each other (supplier_of, customer_of, landlord_of, tenant_of, adviser_to, bank_of, ...), who supplies a product (supplier_of). Names exactly as in your parties list.
 - topics: up to three of these topic pages of the business's wiki that the document has something to say about, each with up to 4 points from it that belong on that page, each a full sentence that names what it is about:
 {listing}
   Answer "new" (with a short title and its section) only for a subject none of these covers and a business keeps one page on; never a page for this one document, a company, a person or a product.
 - project: its project folder, one of: {projects}. "general" unless one clearly fits.
-- photo: only when the document is a photo or picture: a plain, factual description of what it shows (the scene or place, objects, products, equipment, quantities, condition, any documents or screens in view, any text, quoted). Describe people and never name anyone from their face: a name may come only from text in the picture. Empty for any other document.
+{menu}- photo: only when the document is a photo or picture: a plain, factual description of what it shows (the scene or place, objects, products, equipment, quantities, condition, any documents or screens in view, any text, quoted). Describe people and never name anyone from their face: a name may come only from text in the picture. Empty for any other document.
 
 Report only what the document states and leave a field empty when it does not say. Never guess and never add outside knowledge."""
 
@@ -1531,7 +1413,7 @@ def claude_read(model, src, sysmsg, listing, titles, proj_list):
     user = (f"Document file name: {name}\n<document>\n{body[:CLAUDE_DOC_CHARS]}\n</document>\n"
             + (f"\nOnly the start of this long document is shown ({CLAUDE_DOC_CHARS} characters).\n" if truncated else "")
             + (LOOK_AT.format(path=target) if look else "")
-            + "\n" + Q_EXTRACT.format(listing=listing, projects=", ".join(proj_list)))
+            + "\n" + Q_EXTRACT.format(listing=listing, projects=", ".join(proj_list), menu=menu_question()))
     wiki_events.emit("read", file=src)
     log(f"reading {src} (Claude)")
     schema, dirs = extract_schema(titles, proj_list), [os.path.dirname(target)] if look else ()
@@ -1607,6 +1489,7 @@ def claude_document(model, wiki, claims, got, sysmsg, touched):
     existing, choices, _ = topic_choices(wiki)
     d["topics"], project = settle_topics({"topics": a.get("topics"), "project": a.get("project")}, d, wiki,
                                          existing, choices, projects())
+    d["menu"] = wiki_menu.normalise(a.get("menu"))[:2]
     for t in d["topics"]:   # a usual topic an earlier document of this run has just created
         if not t["rel"]:
             t["rel"] = topic_match(t["title"], wiki.topics())
@@ -1747,8 +1630,9 @@ def read_with_claude(model, wiki, claims, docs, sysmsg, touched):
     return ok
 
 
-# The label a document prints just before an identifier decides what it is; the model's
-# own label is only a hint (a small model files an SST number as a registration number).
+# The label a document prints just before a company's identifier decides what it is; the
+# model's own label is only a hint (a small model files an SST number as a registration
+# number).
 ID_LABELS = [
     ("sst_no", r"\b(sst|sales\s*(and|&)\s*services?\s*tax|service\s*tax)(?!\w)"),
     ("tin_no", r"\b(tin|tax\s*(identification|id|ref(erence)?|no|number|file))(?!\w)"),
@@ -1756,26 +1640,181 @@ ID_LABELS = [
     ("licence_no", r"\b(licen[cs]e|permit)(?!\w)"),
     ("registration_no", r"\b(company|co\.|roc|ssm|business|registration|reg\.|incorporat\w*)(?!\w)"),
 ]
+# The labels of a person's own numbers: an identity card or passport ("NRIC", "I.C.", "No.
+# K.P. Baru", "Identity Card"), EPF (KWSP) and SOCSO (PERKESO). They keep such a number
+# off a company's card and out of the figures; they never decide a person's numbers.
+IC_WORDS = (r"\b(n\.?\s*r\.?\s*i\.?\s*c|i\s*[./]?\s*c|identity\s+card|my\s*kad|passport|pasport|k\s*[./]\s*p|"
+            r"kad\s+pengenalan)(?!\w)")
+PERSON_LABELS = [("id_no", IC_WORDS), ("epf_no", r"\b(epf|kwsp)(?!\w)"), ("socso_no", r"\b(socso|perkeso)(?!\w)")]
+# A person's numbers come from the reader alone, with the kind it gave: the label words of
+# real documents are too many to require (aligned columns, tables, a label on the line
+# above, "No. K.P. Baru", "EPF (Pekerja)"). Only explicit counter-evidence drops one: the
+# label right before the number naming the employer or a company ("Employer EPF No").
+# This is safe enough because an Info card is never overwritten: a number that differs
+# from the one on the card goes to the review queue (merge_ids), so a reader's slip shows.
+PERSON_KEEPS = ("id_no", "epf_no", "socso_no", "tin_no", "bank_account")
+EMPLOYER_LABEL = re.compile(r"\b(employer|majikan|syarikat|company)|\bco\.", re.I)
+_DASHES = r"\-‐‑‒–—"   # inside a [...] class: hyphens and dashes
 
 
-def identifier_kind(value, body):
-    """The kind of identifier `value` is, read from the label in front of it in the
-    document, or None when the document does not contain it or does not say."""
-    v = re.sub(r"\s+", "", value or "")
+def bare(value):
+    """A number without its spaces, dashes and dots: "900101 14 5678" and "900101.14.5678"
+    are the same card."""
+    return re.sub(rf"[\s.{_DASHES}]+", "", value or "")
+
+
+def ic_shaped(value):
+    """Whether a number has a MyKad's shape: YYMMDD (a real date), the place of birth, four
+    digits. Written without its dashes, twelve digits starting 19 or 20 are a company's
+    number (its year of incorporation first), not a card."""
+    v = bare(value)
+    if not re.fullmatch(r"\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{6}", v):
+        return False
+    return ic_written(value) or v[:2] not in ("19", "20")
+
+
+def ic_written(value):
+    """Whether a number is written as a MyKad is, in three groups: never a company's."""
+    return bool(re.fullmatch(rf"\s*\d{{6}}[\s.{_DASHES}]+\d{{2}}[\s.{_DASHES}]+\d{{4}}\s*", value or ""))
+
+
+def spots(value, body):
+    """Where the document prints `value` (spaces, dashes and dots aside) as a number, not as
+    an amount: a currency code as a word right before a short or decimal figure ("RM
+    1170", "MYR 990.00"), or ".00" after one ("6930.00"); and "11.70" never prints 1170.
+    An account number after "Farm" or "MYR" is still an account number. [] when it is not
+    printed as a number at all."""
+    raw = re.sub(r"\s+", "", value or "")
+    v = bare(value)
     if len(v) < 4 or sum(c.isdigit() for c in v) < 4:
-        return None  # "SDN BHD" is not a number
-    pattern = r"\s*".join(re.escape(c) for c in v)
+        return []  # "SDN BHD" is not a number
+    if (re.match(r"(?i)(?:rm|myr|usd|sgd|us\$|s\$|\$)", raw) or re.fullmatch(r"[\d,]*\d\.\d\d", raw)
+            or re.fullmatch(r"\d{1,3}(?:,\d{3})+", raw)):
+        return []  # "RM 385.00", "1,170": an amount, not a number that names anyone
+    figure = v.isdigit() and len(v) <= 7
+    pattern = r"(?<!\d)" + rf"[\s.{_DASHES}]*".join(re.escape(c) for c in v) + r"(?!\d)"
+    out = []
     for m in re.finditer(pattern, body, re.I):
-        window = body[max(0, m.start() - 48):m.start()]
-        window = window.split("\n")[-1] if "\n" in window[-30:] else window
-        # The label right before the number names it, back to the previous value or gap
-        # ("SST No: X  TIN: Y": Y is the TIN); within one label the order above decides
-        # ("SST Registration No" is an SST number).
-        phrase = re.split(r"\s{2,}|[;|]|\b[\w-]*\d[\w-]*\b", window)[-1]
-        for kind, rx in ID_LABELS:
-            if re.search(rx, phrase, re.I):
-                return kind
+        if "." not in raw and re.search(r"\.\d{2}$", m.group(0)):
+            continue  # "11.70" is an amount, never the number 1170
+        decimals = re.match(r"\.\d{2}(?!\d)|,\d{3}(?!\d)", body[m.end():m.end() + 5])
+        currency = re.search(r"(?i)(?<![a-z])(?:rm|myr|usd|sgd)\s*$|\$\s*$", body[max(0, m.start() - 12):m.start()])
+        if figure and (decimals or currency):
+            continue  # this mention is an amount: another may still be the number
+        out.append(m)
+    return out
+
+
+def _phrase(body, start):
+    """The label right before a place in the document, as a company's number is read: the
+    words on its line back to the previous value or gap ("SST No: X  TIN: Y": Y is the
+    TIN). Within one label the order of the lists decides ("SST Registration No")."""
+    window = body[max(0, start - 48):start]
+    window = window.split("\n")[-1] if "\n" in window[-30:] else window
+    return re.split(r"\s{2,}|[;|]|\b[\w-]*\d[\w-]*\b", window)[-1]
+
+
+def _cell_label(body, start):
+    """A looser reading, only to tell whether a part may hold numbers worth asking the
+    local model about: the nearest stretch with letters across a column gap or a table
+    cell ("EPF No      : x", "| EPF No | x |"), or the short line above a value that
+    starts its line ("EPF No" over "20481234")."""
+    line_start = body.rfind("\n", 0, start) + 1
+    text = re.split(r"\b[\w-]*\d[\w-]*\b", body[line_start:start])[-1]
+    for seg in reversed(re.split(r"\s{2,}|\t|[;|]", text[-48:])):
+        if re.search(r"[^\W\d_]", seg):
+            return seg
+    if not re.search(r"[^\W_]", body[line_start:start]):
+        return _line_above(body, line_start)
+    return ""
+
+
+def _line_above(body, line_start):
+    """The short line above a line, when it holds no figures (a label over its value)."""
+    above = [l for l in body[:line_start].split("\n") if l.strip()][-1:]
+    return above[0].strip() if above and len(above[0].strip()) <= 40 and not re.search(r"\d", above[0]) else ""
+
+
+# A label's own words that name a number ("No", "A/C", an identity card): a bracket that
+# holds none of them only qualifies the label before it ("Employer EPF No. (KWSP):").
+NUMBER_WORD = re.compile(rf"(?:\b(?:no|number|nombor|num|a/c|acc|acct|account|akaun)\b|#|{IC_WORDS})", re.I)
+
+
+def _own_label(body, start):
+    """The label that is a number's own, where an employer's or a company's word makes it
+    theirs: after the previous value, a field's comma or the previous field's colon, with
+    what a bracket adds to it ("Company Bank A/C (Maybank):"), but not the sentence before
+    a bracketed label ("The Company offers Ram Gurung (Passport No.: x)"); for a value that
+    starts its line, the short line above too."""
+    line_start = body.rfind("\n", 0, start) + 1
+    text = re.split(r"\b[\w-]*\d[\w-]*\b", body[line_start:start])[-1]
+    text = re.split(r",\s", text)[-1]
+    parts = text.split(":")
+    if len(parts) >= 3:   # "Company: Harbourline Bank A/C: x": the last label
+        text = ":".join(parts[-2:])
+    segs = [seg for seg in re.split(r"\s{2,}|\t|[;|(]", text[-48:]) if re.search(r"[^\W\d_]", seg)]
+    own = segs[-1] if segs else ""
+    if len(segs) > 1 and not NUMBER_WORD.search(own):
+        own = f"{segs[-2]} ({own}"   # "(KWSP):" qualifies "Employer EPF No." before it
+    if not re.search(r"[^\W_]", body[line_start:start]):
+        own = (_line_above(body, line_start) + " " + own).strip()
+    return own
+
+
+def id_phrases(value, body, wide=False):
+    """The label in front of each place the document prints `value` as a number (spots);
+    wide: read as _cell_label does, only to decide whether to ask about a part."""
+    return [(_cell_label if wide else _phrase)(body, m.start()) for m in spots(value, body)]
+
+
+def _kinds(phrase, labels):
+    return [kind for kind, rx in labels if re.search(rx, phrase, re.I)]
+
+
+def identifier_kind(value, body, wide=False):
+    """The kind of identifier `value` is by the label in front of it, a person's or a
+    company's, or None: such a number is never a figure. wide: see id_phrases."""
+    for phrase in id_phrases(value, body, wide):
+        kinds = _kinds(phrase, PERSON_LABELS + ID_LABELS)
+        if kinds:
+            return kinds[0]
     return None
+
+
+def company_id_kind(value, body, fund=False):
+    """The kind of company identifier `value` is (registration, tax, SST, licence, bank
+    account), by the label in front of it, or None. A person's number is none of them: a
+    card written as one, a label naming EPF or SOCSO ("EPF Account No"), or an identity
+    card with the value in its shape under "NRIC/Company No.", never gives a company's.
+    fund: the party is the EPF or SOCSO itself, whose own account its name labels ("KWSP's
+    account no.")."""
+    if ic_written(value):
+        return None
+    for phrase in id_phrases(value, body):
+        kinds = _kinds(phrase, ID_LABELS)
+        if not kinds:
+            continue
+        person = _kinds(phrase, PERSON_LABELS)
+        if ({"epf_no", "socso_no"} & set(person) and not fund) or ("id_no" in person and ic_shaped(value)):
+            return None
+        return kinds[0]
+    return None
+
+
+def person_value(value, said, body):
+    """Whether the number the reader gave for a person, as `said`, goes on that person's
+    card: a kind a person holds, at least six digits (no year, no contribution), printed
+    in the document and not as an amount, and nowhere labelled as the employer's or a
+    company's ("Employer EPF No: x"; an identity card's shape under "NRIC No./Company No."
+    is still the card)."""
+    if said not in PERSON_KEEPS or sum(c.isdigit() for c in bare(value)) < 6:
+        return False
+    found = spots(value, body)
+    for m in found:
+        label = _own_label(body, m.start())
+        if EMPLOYER_LABEL.search(label) and not (said == "id_no" and ic_shaped(value) and re.search(IC_WORDS, label, re.I)):
+            return False
+    return bool(found)
 
 
 def id_owner(value, body, said, parties, lines_above=0):
@@ -1845,6 +1884,24 @@ def seed_claims(model, sysmsg, claims, rel, wiki):
     claims.add(sentinel)
 
 
+def body_page(wiki, body_name):
+    """The existing page of a listed government body, or None: one titled with the body's
+    name or one of its listed names, or carrying one as an alias the engine gave it for
+    the body. Compared name for name, never by a core name: a business's page ("KWSP Sdn
+    Bhd", its short alias "KWSP"; "JBPM Sdn Bhd") is never the body's."""
+    for rel, pg in sorted(wiki.pages.items()):
+        if not rel.startswith("wiki/companies/") or "person" in pg["tags"]:
+            continue
+        title = pg["title"]
+        if wiki_menu.listed_exact(title) == body_name:
+            return rel
+        short = norm_full(split_suffix(title)[0])
+        if not wiki_menu.company_named(title) and any(
+                wiki_menu.listed_exact(a) == body_name and norm_full(a) != short for a in pg["aliases"]):
+            return rel
+    return None
+
+
 def plan_document(model, wiki, claims, sysmsg, d, dest, body):
     """Pages for the parties (existing or reserved), their verified identifiers, the
     figure records, and the contradictions with what is already recorded. Asks the model
@@ -1854,9 +1911,22 @@ def plan_document(model, wiki, claims, sysmsg, d, dest, body):
     for p in d["parties"]:
         if p["kind"] not in ("company", "person", "product"):
             continue
+        gov = []
         if p["kind"] == "product":
             p["name"] = clean_line(PRODUCT_NOISE.sub(" ", re.sub(r"\s*\([^)]*\)", "", p["name"])), 120) or p["name"]
             rel = wiki.find_product(p["name"])
+        elif p["kind"] == "company" and wiki_menu.government_page(p["name"]):
+            # A government body has one page, whatever name a document uses for it ("LHDN",
+            # "Lembaga Hasil Dalam Negeri Malaysia"): titled with its name in the menu's
+            # list, and carrying every other name it goes by, so each of them finds it.
+            # Only a party named exactly as the body counts (wiki_menu.government_page),
+            # and only a page that is the body's takes its documents (body_page): a
+            # business named with an alias and more ("KWSP Sdn Bhd") keeps its own page.
+            body_name = wiki_menu.government_page(p["name"])
+            gov = [body_name] + wiki_menu.government_aliases(body_name)
+            p["variants"] = list(dict.fromkeys(p.get("variants", []) + [p["name"]]))
+            p["name"] = body_name
+            rel = body_page(wiki, body_name)
         else:
             rel = wiki.find_entity(p["name"], p["kind"])
         twin = next((x for x in plan["parties"] if rel and x["rel"] == rel), None)
@@ -1868,18 +1938,46 @@ def plan_document(model, wiki, claims, sysmsg, d, dest, body):
             folder = "products" if p["kind"] == "product" else "companies"
             rel = wiki.unique_path(folder, slugify(p["name"]))
             alias = clean_line(SUFFIX_ORIG_RE.sub("", p["name"]).strip(" ,."), 120) if p["kind"] == "company" else ""
-            wiki.reserve(rel, label(p["name"], 120), p["kind"], [label(alias, 120)] if alias and alias != p["name"] else [])
-        plan["parties"].append({"p": p, "rel": rel, "exists": exists, "ids": {},
+            if alias and wiki_menu.listed_exact(alias):
+                alias = ""   # "KWSP Sdn Bhd" is never called "KWSP": that is the EPF
+            aliases = [alias] if alias and alias != p["name"] else []
+            if gov:
+                aliases = [a for a in dict.fromkeys(gov[1:] + p["variants"]) if norm_full(a) != norm_full(p["name"])]
+            wiki.reserve(rel, label(p["name"], 120), p["kind"], [label(a, 120) for a in aliases])
+        plan["parties"].append({"p": p, "rel": rel, "exists": exists, "ids": {}, "aliases": gov,
                                 "own": bool(own) and p["kind"] == "company" and same_entity(own, p["name"])})
     by_name = {}
     for x in plan["parties"]:  # every spelling the parts used finds the party
         for v in x["p"].get("variants", []) + [x["p"]["name"]]:
             by_name.setdefault(norm_full(v), x)
+    # Who the reader gave each number for: one given for two parties is nobody's.
+    given = {}
+    for i in d["identifiers"]:
+        v = bare(clean_line(i.get("value"), 80)).lower()
+        if v:
+            x = by_name.get(norm_full(i.get("entity", "")))
+            given.setdefault(v, set()).add(id(x) if x else None)
+    held = set()   # a person's numbers, kept or not: never swept up for a company
     for i in d["identifiers"]:
         value = clean_line(i.get("value"), 80)
-        kind = identifier_kind(value, body)
         x = by_name.get(norm_full(i.get("entity", "")))
-        if not kind or not x:
+        if not bare(value) or not x:
+            continue   # nothing, or only dashes or dots ("SOCSO No: -")
+        said = i.get("kind")
+        if x["p"]["kind"] == "person":
+            # A person's number stays with the person the reader gave it for, with the kind
+            # it gave, unless the document labels it the employer's or a company's
+            # (person_value). Never moved to another party, never filed as another kind.
+            if person_value(value, said, body):
+                held.add(bare(value).lower())
+                if len(given[bare(value).lower()]) == 1:
+                    x["ids"].setdefault(said, value)
+            continue
+        if said in PERSON_IDS:
+            continue   # a company never holds a person's number, under any other kind either
+        names = " ".join([x["p"]["name"]] + wiki_menu.government_aliases(x["p"]["name"]))
+        kind = company_id_kind(value, body, fund=bool(re.search(r"\b(epf|kwsp|socso|perkeso)\b", names, re.I)))
+        if not kind:
             continue
         x = id_owner(value, body, x, plan["parties"])
         if kind == "bank_account" and BANKISH.search(x["p"]["name"]):
@@ -1889,14 +1987,18 @@ def plan_document(model, wiki, claims, sysmsg, d, dest, body):
             if not x:
                 continue
         x["ids"].setdefault(kind, value)
-    have_ids = {re.sub(r"\s+", "", v).lower() for x in plan["parties"] for v in x["ids"].values()}
+    # A company's numbers the answers left out, found by their labels: each goes to the
+    # company its line names. A number the reader gave a person is never swept up for a
+    # company; one dropped as labelled the employer's or a company's ("Company No.: x"
+    # given for the employee) is left for the company its line names.
+    have_ids = {bare(v).lower() for x in plan["parties"] for v in x["ids"].values()} | held
     firms = [x for x in plan["parties"] if x["p"]["kind"] == "company"]
     for tok in id_tokens(body):
-        if any(re.sub(r"\s+", "", tok).lower() in h for h in have_ids):
+        if any(bare(tok).lower() in h for h in have_ids):
             continue
-        kind = identifier_kind(tok, body)
+        kind = company_id_kind(tok, body)
         holders = [x for x in firms if not (kind == "bank_account" and BANKISH.search(x["p"]["name"]))]
-        owner = id_owner(tok, body, None, holders) if holders else None
+        owner = id_owner(tok, body, None, holders) if holders and kind else None
         if kind and owner and kind not in owner["ids"]:
             owner["ids"][kind] = clean_line(tok, 80)
 
@@ -2014,6 +2116,7 @@ def write_document(wiki, claims, src, dest, project, d, plan, truncated, n_parts
     claims.save()
 
     # The summary page first, so every link to it resolves even if a later step fails.
+    d["menu_paths"] = doc_menu(d, title)
     write(summary_rel, summary_page(wiki, d, dest, project, title, plan, rels, decisions, truncated, n_parts))
     page_event(summary_rel, created, wiki)
 
@@ -2022,7 +2125,7 @@ def write_document(wiki, claims, src, dest, project, d, plan, truncated, n_parts
         write_entity(wiki, claims, x, dest, summary_rel, title, x["rel"] in conflicted)
         touched.setdefault(x["rel"], "entity")
     for t in d["topics"]:
-        write_topic(wiki, claims, t["rel"], t["title"], dest)
+        write_topic(wiki, claims, t["rel"], t["title"], dest, d["menu_paths"])
         touched.setdefault(t["rel"], "topic")
     for dc in decisions:
         write_decision(wiki, dc, dest, summary_rel, title, plan)
@@ -2129,6 +2232,35 @@ def link_of(wiki):
     return f
 
 
+def menu_line(paths):
+    """A page's place in the wiki's menu, as a frontmatter line (scripts/wiki_menu.py)."""
+    return "menu: [" + ", ".join(yq(p) for p in paths) + "]"
+
+
+def topic_menu(rel, title):
+    """A topic page's place in the menu: its own menu: when it has one, else where its
+    title says (a starter topic's place, or its words')."""
+    if rel and os.path.exists(os.path.join(WIKI_DIR, rel)):
+        own = wiki_menu.normalise(fm_list(split_frontmatter(read(rel))[0], "menu") or [])
+        if own:
+            return own
+    return wiki_menu.topic_paths(title)
+
+
+def doc_menu(d, title):
+    """Where a document's summary page sits in the menu: where the reader put it; else
+    where the topic pages it adds to are (two at most); else where its title and type say
+    (one); else nowhere, and Claude may place it later (wiki_menu.py ask)."""
+    menu = wiki_menu.normalise(d.get("menu"))[:2]
+    if menu:
+        return menu
+    for t in d["topics"]:
+        menu += [p for p in topic_menu(t["rel"], t["title"]) if p not in menu]
+    if menu:
+        return menu[:2]
+    return wiki_menu.keyword_paths(f"{title} {d['doc_type']}", doc=True)[:1]
+
+
 def summary_page(wiki, d, dest, project, title, plan, rels, decisions, truncated, n_parts):
     link = link_of(wiki)
     lines = ["---", f"title: {yq(label(title, 160))}", "type: summary", f"tags: [{yq(d['doc_type'])}]",
@@ -2137,6 +2269,8 @@ def summary_page(wiki, d, dest, project, title, plan, rels, decisions, truncated
              f"updated: {today()}", f"project: {yq(project)}"]
     if d["doc_date"]:
         lines.append(f"doc_date: {yq(d['doc_date'])}")
+    if d.get("menu_paths"):
+        lines.append(menu_line(d["menu_paths"]))
     lines += ["engine: local", "---", ""]
     who = "from Claude's reading" if Run.reader == "claude" else "by the model on this Mac"
     lines.append(f"> Summary of {raw_link(dest)} written {who}. Every figure on this page "
@@ -2238,6 +2372,7 @@ def write_entity(wiki, claims, x, dest, summary_rel, summary_title, conflicted):
             "them. Remove the two wiki-engine marker lines to let it update them again."])
     if fm:
         fm = merge_ids(fm, x["ids"], rel, wiki, dest)
+        fm = merge_aliases(fm, x.get("aliases"), wiki.pages[rel]["title"])
         write(rel, "---\n" + fm.strip("\n") + "\n---\n" + new_body)
     else:
         write(rel, new_body)
@@ -2247,7 +2382,9 @@ def write_entity(wiki, claims, x, dest, summary_rel, summary_title, conflicted):
 
 def merge_ids(fm, ids, rel, wiki, dest):
     """Verified identifiers added to a page's facts: map (its Info card). A key the card
-    already has is never changed; a different value goes to the review queue. A facts:
+    already has is never changed; a different value goes to the review queue ("an
+    identifier differs"). That is the net under trusting the reader with a person's
+    numbers (person_value): a slip never replaces a number, and a person sees it. A facts:
     entry in a shape this does not write (a flow map, a comment) is left alone."""
     if not ids:
         return fm
@@ -2275,6 +2412,19 @@ def merge_ids(fm, ids, rel, wiki, dest):
     return fm[:start] + "\n".join(["facts:"] + lines + add) + fm[end:]
 
 
+def merge_aliases(fm, aliases, title):
+    """Other names of a page (a government body's) added to its aliases: none is ever
+    taken out, and an aliases: entry in a shape this does not write is left alone."""
+    have = fm_list(fm, "aliases") if aliases else None
+    if have is None:
+        return fm
+    known = {norm_full(title)} | {norm_full(h) for h in have}
+    add = [label(a, 120) for a in dict.fromkeys(aliases) if norm_full(a) not in known]
+    if not add:
+        return fm
+    return fm_set(fm, "aliases", "aliases: [" + ", ".join(yq(a) for a in have + add) + "]")
+
+
 def topic_block(wiki, claims, rel, overview=None):
     engine_page = wiki.pages.get(rel, {}).get("engine", True)
     body = split_frontmatter(read(rel))[1] if os.path.exists(os.path.join(WIKI_DIR, rel)) else ""
@@ -2284,12 +2434,16 @@ def topic_block(wiki, claims, rel, overview=None):
     return LP.topic_block(ov, points, link_of(wiki), with_overview=engine_page)
 
 
-def write_topic(wiki, claims, rel, title, dest):
+def write_topic(wiki, claims, rel, title, dest, doc_paths=()):
     path = os.path.join(WIKI_DIR, rel)
     if not os.path.exists(path):
+        # Its place in the menu: a starter topic's, or the one its title names, or else the
+        # document's that created it.
+        paths = wiki_menu.topic_paths(title) or list(doc_paths)[:1]
         lines = ["---", f"title: {yq(label(title, 80))}", "type: concept", "tags: [topic]",
-                 f"sources: [{yq(dest)}]", "status: draft", f"updated: {today()}", "engine: local", "---", "",
-                 LP.render_block(topic_block(wiki, claims, rel)), ""]
+                 f"sources: [{yq(dest)}]", "status: draft", f"updated: {today()}"]
+        lines += ([menu_line(paths)] if paths else []) + ["engine: local", "---", "",
+                                                          LP.render_block(topic_block(wiki, claims, rel)), ""]
         write(rel, "\n".join(lines))
         page_event(rel, True, wiki)
         return
@@ -2762,11 +2916,33 @@ def pending(folder):
     return out
 
 
+# The example rules HOUSE-RULES.md has shipped with, above its first heading. A wiki keeps
+# its copy through every update, so they may still be there: they are examples, not the
+# business's rules, and one of them ("Never record staff salaries") contradicts what
+# employee pages now hold. Only these exact lines, and only above the first "##" heading
+# (where the examples stand), are left out; every line the owner wrote is read.
+STOCK_EXAMPLES = {
+    '- Our company is Example Trading Ltd. "We", "us" and "the company" mean Example Trading.',
+    "- Customers are filed under `companies/customers/`, suppliers under `companies/suppliers/`.",
+    "- Example Logistics is a supplier, even when a document calls it a partner.",
+    "- Amounts are in MYR unless a source says otherwise. Write them as `RM 1,250.00`.",
+    "- Never record staff salaries in the wiki. Note only that a payslip exists.",
+    "- Name staff as on their IC, with the name they go by in brackets.",
+    "- Our financial year ends on 31 December.",
+}
+
+
 def house_rules():
     try:
-        return read("HOUSE-RULES.md")[:HOUSE_RULES_CHARS]
+        text = read("HOUSE-RULES.md")
     except OSError:
         return ""
+    lines, examples = [], True
+    for line in text.split("\n"):
+        examples = examples and not line.startswith("##")
+        if not (examples and line.rstrip() in STOCK_EXAMPLES):
+            lines.append(line)
+    return "\n".join(lines)[:HOUSE_RULES_CHARS]
 
 
 def load_config():
@@ -2886,6 +3062,14 @@ def run(server=None, only_docs=None, packets_only=False, reader="local", tried_p
             log(f"overviews stopped: {e}")
         except Exception as e:
             log(f"overviews skipped: {e}")
+        try:
+            # The company, people and topic pages this run touched take their places in the
+            # menu now, so the site rebuilt after this batch shows them there.
+            counts = wiki_menu.label([r for r, k in touched.items() if k in ("entity", "topic")], claims)
+            if counts["changed"]:
+                log(f"placed {counts['changed']} page(s) in the menu")
+        except Exception as e:   # the menu never fails a run: the runner's tidy step labels again
+            log(f"menu labels skipped: {e}")
     except ModelUnavailable as e:
         log(str(e))
         wiki_events.emit("claude-end", label=label_, ok=False, detail=str(e))

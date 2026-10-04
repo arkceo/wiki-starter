@@ -1,3 +1,4 @@
+import { createHash } from "crypto"
 import { QuartzComponent, QuartzComponentConstructor, QuartzComponentProps } from "./types"
 import style from "./styles/explorer.scss"
 
@@ -8,6 +9,7 @@ import { i18n } from "../i18n"
 import { FileTrieNode } from "../util/fileTrie"
 import OverflowListFactory from "./OverflowList"
 import { concatenateResources } from "../util/resources"
+import { MenuSection } from "../util/menu"
 
 type OrderEntries = "sort" | "filter" | "map"
 
@@ -20,6 +22,14 @@ export interface Options {
   filterFn: (node: FileTrieNode) => boolean
   mapFn: (node: FileTrieNode) => void
   order: OrderEntries[]
+  /**
+   * Sections shown above the folder tree, in order, each with its categories. A page
+   * joins them through the `menu:` field of its frontmatter ("section/category" keys) and
+   * then appears under every category it names instead of in its folder. Sections and
+   * categories with no page are hidden. They only collapse and expand: there is no page
+   * behind them.
+   */
+  menu?: MenuSection[]
 }
 
 const defaultOptions: Options = {
@@ -59,6 +69,21 @@ let numExplorers = 0
 export default ((userOpts?: Partial<Options>) => {
   const opts: Options = { ...defaultOptions, ...userOpts }
   const { OverflowList, overflowListAfterDOMLoaded } = OverflowListFactory()
+  // The menu travels in the shared script (written once, cached by the browser), not in
+  // every page: the page names it by a hash of its content, so two explorers with the same
+  // menu (one per layout) share one copy. `<` is escaped so no text can end a script.
+  const menuJson = opts.menu
+    ? JSON.stringify(opts.menu)
+        .replace(/</g, "\\u003c")
+        .replace(/\u2028/g, "\\u2028")
+        .replace(/\u2029/g, "\\u2029")
+    : undefined
+  const menuId = menuJson
+    ? createHash("sha256").update(menuJson).digest("hex").slice(0, 12)
+    : undefined
+  const menuScript = menuJson
+    ? `(window.explorerMenus = window.explorerMenus || {})["${menuId}"] = ${menuJson}`
+    : undefined
 
   const Explorer: QuartzComponent = ({ cfg, displayClass }: QuartzComponentProps) => {
     const id = `explorer-${numExplorers++}`
@@ -75,6 +100,7 @@ export default ((userOpts?: Partial<Options>) => {
           filterFn: opts.filterFn.toString(),
           mapFn: opts.mapFn.toString(),
         })}
+        data-menu-id={menuId}
       >
         <button
           type="button"
@@ -160,6 +186,6 @@ export default ((userOpts?: Partial<Options>) => {
   }
 
   Explorer.css = style
-  Explorer.afterDOMLoaded = concatenateResources(script, overflowListAfterDOMLoaded)
+  Explorer.afterDOMLoaded = concatenateResources(menuScript, script, overflowListAfterDOMLoaded)
   return Explorer
 }) satisfies QuartzComponentConstructor

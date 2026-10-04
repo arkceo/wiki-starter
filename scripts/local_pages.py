@@ -6,6 +6,10 @@ module turns that into Markdown:
 
   escaping      every string that came from a document or the model shows as plain text:
                 no HTML, no links, no Markdown syntax of its own
+  frontmatter   reading a page's frontmatter in the shapes people and Claude write it
+                (quoted values, flow and block lists), and replacing one key in it
+  names         when two names are one company ("Northwind Trading" and "Northwind
+                Trading Sdn Bhd")
   engine block  the part of a page the engine keeps up to date, between two markers:
                     <!-- wiki-engine:start sha=... -->  ...  <!-- wiki-engine:end -->
                 The marker holds a hash of the block. A block a person has edited no longer
@@ -20,6 +24,7 @@ Standard library only.
 import hashlib
 import json
 import re
+import unicodedata
 import urllib.parse
 
 import local_facts as F
@@ -98,6 +103,152 @@ def linked(text, names, limit=600):
         pos = b
     out.append(seg(t[pos:]))
     return "".join(out)
+
+
+# ================================================================ frontmatter ====
+def split_frontmatter(text):
+    if text.startswith("---\n"):
+        end = text.find("\n---", 4)
+        if end != -1:
+            nl = text.find("\n", end + 4)
+            return text[4:end], text[(nl + 1) if nl != -1 else len(text):]
+    return "", text
+
+
+def _key_block(fm, key):
+    """(start, end, first-line value) of a top-level key and its continuation lines."""
+    m = re.search(rf"^{re.escape(key)}:[ \t]*(.*)$", fm, re.M)
+    if not m:
+        return None
+    end = m.end()
+    for line in fm[m.end():].split("\n")[1:]:
+        if re.match(r"^([ \t]+\S|-[ \t]|-$)", line):
+            end += 1 + len(line)
+        else:
+            break
+    return m.start(), end, m.group(1).strip()
+
+
+def _flow_items(inner):
+    """Items of a YAML flow list body, honouring quotes (a comma inside "..." stays)."""
+    items, cur, q, i = [], "", None, 0
+    while i < len(inner):
+        ch = inner[i]
+        if q:
+            if ch == "\\" and q == '"' and i + 1 < len(inner):
+                cur += ch + inner[i + 1]
+                i += 2
+                continue
+            cur += ch
+            if ch == q:
+                q = None
+        elif ch in "\"'":
+            q = ch
+            cur += ch
+        elif ch == ",":
+            items.append(cur)
+            cur = ""
+        else:
+            cur += ch
+        i += 1
+    items.append(cur)
+    out = []
+    for it in items:
+        it = it.strip()
+        if not it:
+            continue
+        if it[0] == '"' and it[-1:] == '"':
+            try:
+                it = json.loads(it)
+            except ValueError:
+                it = it[1:-1]
+        elif it[0] == "'" and it[-1:] == "'":
+            it = it[1:-1].replace("''", "'")
+        out.append(it)
+    return out
+
+
+def fm_list(fm, key):
+    """A list value in any common shape: [a, "b, c"], block items (indented or not), or a
+    single scalar. None when the shape is not a list of plain values (left alone)."""
+    blk = _key_block(fm, key)
+    if blk is None:
+        return []
+    start, end, first = blk
+    if first.startswith("["):
+        if not first.endswith("]"):
+            return None
+        return _flow_items(first[1:-1])
+    rest = fm[start:end].split("\n")[1:]
+    if not first:
+        items = []
+        for line in rest:
+            m = re.match(r"^[ \t]*-[ \t]*(.*)$", line)
+            if not m:
+                return None  # a nested map or multi-line value: not ours to rewrite
+            items += _flow_items(m.group(1)) if m.group(1) else []
+        return items
+    if rest or first.startswith(("{", "|", ">")):
+        return None
+    return _flow_items(first)
+
+
+def fm_get(fm, key):
+    blk = _key_block(fm, key)
+    if not blk:
+        return ""
+    v = blk[2]
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        items = _flow_items(v)
+        return items[0] if items else ""
+    return v
+
+
+def fm_set(fm, key, line):
+    """Replace a top-level key's whole entry (with its continuation lines), or add it."""
+    blk = _key_block(fm, key)
+    if blk:
+        return fm[: blk[0]] + line + fm[blk[1]:]
+    return fm.rstrip("\n") + "\n" + line
+
+
+# ====================================================================== names ====
+SUFFIX_WORDS = ("sdn bhd", "berhad", "bhd", "pte ltd", "pte", "ltd", "limited", "inc", "llc",
+                "llp", "plc", "corp", "corporation", "company", "co", "gmbh", "ag", "sa", "pty ltd",
+                "pty")
+SUFFIX_RE = re.compile(r"(?:\s+(?:" + "|".join(re.escape(w) for w in SUFFIX_WORDS) + r"))+\s*$")
+# The same suffixes as written ("Sdn. Bhd.", ", Inc."), to derive the short alias.
+SUFFIX_ORIG_RE = re.compile(r"(?:[\s,]+(?:" + "|".join(w.replace(" ", r"\.?\s*") + r"\.?" for w in SUFFIX_WORDS)
+                            + r"))+\s*$", re.I)
+
+
+def norm_full(name):
+    """Casefolded words, any script, punctuation dropped."""
+    n = unicodedata.normalize("NFKC", str(name or "")).casefold().replace("&", " and ")
+    return " ".join(re.sub(r"[\W_]+", " ", n).split())
+
+
+def split_suffix(name):
+    """('northwind trading', 'sdn bhd') for 'Northwind Trading Sdn. Bhd.'"""
+    full = norm_full(name)
+    m = SUFFIX_RE.search(" " + full)
+    if not m:
+        return full, ""
+    core = (" " + full)[: m.start()].strip()
+    return (core, m.group(0).strip()) if core else (full, "")
+
+
+def same_entity(a, b):
+    """Two names for one company: identical, or the same core where at most one carries
+    a legal suffix ('Northwind Trading' and 'Northwind Trading Sdn Bhd'). Different
+    suffixes ('... Sdn Bhd' and '... Pte Ltd') are different companies."""
+    if not a or not b:
+        return False
+    fa, fb = norm_full(a), norm_full(b)
+    if fa and fa == fb:
+        return True
+    (ca, sa), (cb, sb) = split_suffix(a), split_suffix(b)
+    return bool(ca) and ca == cb and (not sa or not sb)
 
 
 # =============================================================== engine block ====

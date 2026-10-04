@@ -2,6 +2,23 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## The menu in sections
+- **The menu on the left is sorted into sections:** Company Profile, Marketing, Sales,
+  Customer Service, Human Resources, Operation, Legal, Account and Finance. Only parts
+  with pages show, and each folds away. Products, projects, decisions and updates follow.
+- **Company Profile** holds the business itself (with its directors and shareholders) and
+  everyone it deals with: employees, contractors, customers, suppliers, company secretary,
+  accountant, auditor, tax agent, lawyer, government bodies, banks, landlords, insurers.
+- Every company, person, document and topic is placed from what the documents say; a firm
+  with two roles shows under both. Nothing moves: each page names its place in a `menu:`
+  line at its top (edit it and add `menu_auto: false` to place a page yourself).
+- **Your existing wiki is sorted once, by itself.** With Claude, pages the rules cannot
+  place go to Claude (titles and first lines only, within the spending cap).
+- **Employee pages show the person's details** as the documents give them: IC or passport,
+  EPF and SOCSO numbers, address, phone, date of birth, salary.
+- Each government body gets one page, whatever name a document uses (LHDN, Lembaga Hasil
+  Dalam Negeri, Inland Revenue Board of Malaysia).
+
 ## Big uploads that keep moving, performance modes, and actions
 - **Drop anything, I'll build the wiki.** The Upload page's box has no buttons any more:
   it lights up under the pointer, a click opens the file picker, and while files are

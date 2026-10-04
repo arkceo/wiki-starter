@@ -1,6 +1,7 @@
 import { FileTrieNode } from "../../util/fileTrie"
 import { FullSlug, resolveRelative, simplifySlug } from "../../util/path"
 import { ContentDetails } from "../../plugins/emitters/contentIndex"
+import { readMenu, placeInMenu } from "../../util/menu"
 
 type MaybeHTMLElement = HTMLElement | undefined
 
@@ -62,6 +63,9 @@ function toggleFolder(evt: MouseEvent) {
   // Collapse folder container
   const isCollapsed = !childFolderContainer.classList.contains("open")
   setFolderState(childFolderContainer, isCollapsed)
+  folderContainer
+    .querySelector(".folder-button")
+    ?.setAttribute("aria-expanded", String(!isCollapsed))
 
   const currentFolderState = currentExplorerState.find(
     (item) => item.path === folderContainer.dataset.folderpath,
@@ -80,18 +84,49 @@ function toggleFolder(evt: MouseEvent) {
 }
 
 function createFileNode(currentSlug: FullSlug, node: FileTrieNode): HTMLLIElement {
+  return createPageLink(currentSlug, node.slug, node.displayName)
+}
+
+function createPageLink(currentSlug: FullSlug, slug: FullSlug, title: string): HTMLLIElement {
   const template = document.getElementById("template-file") as HTMLTemplateElement
   const clone = template.content.cloneNode(true) as DocumentFragment
   const li = clone.querySelector("li") as HTMLLIElement
   const a = li.querySelector("a") as HTMLAnchorElement
-  a.href = resolveRelative(currentSlug, node.slug)
-  a.dataset.for = node.slug
-  a.textContent = node.displayName
+  a.href = resolveRelative(currentSlug, slug)
+  a.dataset.for = slug
+  a.textContent = title
 
-  if (currentSlug === node.slug) {
+  if (currentSlug === slug) {
     a.classList.add("active")
   }
 
+  return li
+}
+
+// A section or category of the menu: a folder that only opens and closes, since there is
+// no page behind it. Its state is saved with the folders' under its menu path.
+function createMenuFolder(
+  path: string,
+  title: string,
+  open: boolean,
+  children: HTMLLIElement[],
+): HTMLLIElement {
+  const template = document.getElementById("template-folder") as HTMLTemplateElement
+  const clone = template.content.cloneNode(true) as DocumentFragment
+  const li = clone.querySelector("li") as HTMLLIElement
+  const folderContainer = li.querySelector(".folder-container") as HTMLElement
+  const button = folderContainer.querySelector(".folder-button") as HTMLElement
+  const folderOuter = li.querySelector(".folder-outer") as HTMLElement
+  const ul = folderOuter.querySelector("ul") as HTMLUListElement
+
+  li.classList.add("menu-branch")
+  folderContainer.dataset.folderpath = path
+  ;(button.querySelector(".folder-title") as HTMLElement).textContent = title
+  button.setAttribute("aria-expanded", String(open))
+  if (open) {
+    folderOuter.classList.add("open")
+  }
+  ul.append(...children)
   return li
 }
 
@@ -99,6 +134,7 @@ function createFolderNode(
   currentSlug: FullSlug,
   node: FileTrieNode,
   opts: ParsedOptions,
+  openTowardsCurrent = true,
 ): HTMLLIElement {
   const template = document.getElementById("template-folder") as HTMLTemplateElement
   const clone = template.content.cloneNode(true) as DocumentFragment
@@ -135,18 +171,21 @@ function createFolderNode(
     opts.folderDefaultState === "collapsed"
 
   // if this folder is a prefix of the current path we
-  // want to open it anyways
+  // want to open it anyways (unless the current page is shown in the menu instead)
   const simpleFolderPath = simplifySlug(folderPath)
   const folderIsPrefixOfCurrentSlug =
-    simpleFolderPath === currentSlug.slice(0, simpleFolderPath.length)
+    openTowardsCurrent && simpleFolderPath === currentSlug.slice(0, simpleFolderPath.length)
 
   if (!isCollapsed || folderIsPrefixOfCurrentSlug) {
     folderOuter.classList.add("open")
   }
+  titleContainer
+    .querySelector(".folder-button")
+    ?.setAttribute("aria-expanded", String(folderOuter.classList.contains("open")))
 
   for (const child of node.children) {
     const childNode = child.isFolder
-      ? createFolderNode(currentSlug, child, opts)
+      ? createFolderNode(currentSlug, child, opts, openTowardsCurrent)
       : createFileNode(currentSlug, child)
     ul.appendChild(childNode)
   }
@@ -195,9 +234,20 @@ async function setupExplorer(currentSlug: FullSlug) {
       }
     }
 
+    // The menu's sections come first. The pages placed in them leave the folder tree, which
+    // keeps every other page as before.
+    // (The menu itself comes with this script, under the id the page gives.)
+    const menus = (window as unknown as { explorerMenus?: Record<string, unknown> }).explorerMenus
+    const menuId = explorer.dataset.menuId
+    const menu = placeInMenu(readMenu(menuId ? menus?.[menuId] : undefined), trie)
+
     // Get folder paths for state management
+    const menuPaths = menu.sections.flatMap((section) => [
+      section.path,
+      ...section.categories.map((category) => category.path),
+    ])
     const folderPaths = trie.getFolderPaths()
-    currentExplorerState = folderPaths.map((path) => {
+    currentExplorerState = [...menuPaths, ...folderPaths].map((path) => {
       const previousState = oldIndex.get(path)
       return {
         path,
@@ -211,9 +261,30 @@ async function setupExplorer(currentSlug: FullSlug) {
 
     // Create and insert new content
     const fragment = document.createDocumentFragment()
+    const collapsed = new Map(currentExplorerState.map((item) => [item.path, item.collapsed]))
+    // The current page opens every section and category it sits in.
+    const currentPaths = menu.pathsOf.get(currentSlug) ?? []
+    for (const section of menu.sections) {
+      const categories = section.categories.map((category) =>
+        createMenuFolder(
+          category.path,
+          category.title,
+          !collapsed.get(category.path) || currentPaths.includes(`${section.key}/${category.key}`),
+          category.pages.map((page) =>
+            createPageLink(currentSlug, page.data!.slug, page.displayName),
+          ),
+        ),
+      )
+      const open =
+        !collapsed.get(section.path) ||
+        currentPaths.some((path) => path.startsWith(section.key + "/"))
+      fragment.appendChild(createMenuFolder(section.path, section.title, open, categories))
+    }
+
+    const openTowardsCurrent = !menu.removed.has(currentSlug)
     for (const child of trie.children) {
       const node = child.isFolder
-        ? createFolderNode(currentSlug, child, opts)
+        ? createFolderNode(currentSlug, child, opts, openTowardsCurrent)
         : createFileNode(currentSlug, child)
 
       fragment.appendChild(node)
@@ -241,15 +312,14 @@ async function setupExplorer(currentSlug: FullSlug) {
       window.addCleanup(() => button.removeEventListener("click", toggleExplorer))
     }
 
-    // Set up folder click handlers
-    if (opts.folderClickBehavior === "collapse") {
-      const folderButtons = explorer.getElementsByClassName(
-        "folder-button",
-      ) as HTMLCollectionOf<HTMLElement>
-      for (const button of folderButtons) {
-        button.addEventListener("click", toggleFolder)
-        window.addCleanup(() => button.removeEventListener("click", toggleFolder))
-      }
+    // Set up folder click handlers. With the link behavior every folder title is a link,
+    // and the buttons left are the menu's, which always open and close.
+    const folderButtons = explorer.getElementsByClassName(
+      "folder-button",
+    ) as HTMLCollectionOf<HTMLElement>
+    for (const button of folderButtons) {
+      button.addEventListener("click", toggleFolder)
+      window.addCleanup(() => button.removeEventListener("click", toggleFolder))
     }
 
     const folderIcons = explorer.getElementsByClassName(

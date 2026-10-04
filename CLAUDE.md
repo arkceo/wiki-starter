@@ -99,12 +99,91 @@ facts:
   tin_no: "C0000000000"
 ```
 
+- **Employees' pages** keep the person's full details as the documents give them: the IC
+  or passport, EPF, SOCSO and tax numbers and the bank account in `facts:` (`id_no`,
+  `epf_no`, `socso_no`, `tin_no`, `bank_account`); date of birth, address, phone, email
+  and salary on the page. A number goes on a person's card only when the document prints
+  it as theirs, under its label: an employer's EPF or SOCSO number in a payslip's header,
+  a contribution or a year is not. Leave a field empty rather than guess.
+
 - **Pages written by the wiki engine.** If the wiki was ever run with the model on this
   Mac, or with Claude's fast reading (the default with Claude), pages can hold a block between
   `<!-- wiki-engine:start ... -->` and `<!-- wiki-engine:end -->` (Overview, Current
   facts, Related, Documents), and the figures it read are listed in
   `archive/claims.jsonl`. Edit the block like any other text; the engine never overwrites
   a block that was edited. Leave `archive/claims.jsonl` alone.
+
+## Menu
+
+The local site's left menu shows the wiki in sections (Company Profile, Marketing, Sales,
+Customer Service, Human Resources, Operation, Legal, Account, Finance), each with its
+categories. Pages never move for it: a page appears under every category its frontmatter
+lists in `menu:`, as `section/category` keys.
+
+```yaml
+menu: ["company-profile/accountant", "company-profile/tax-agent"]
+```
+
+- **Summary and topic pages:** the one or two categories that fit best, most fitting first.
+- **Company and people pages:** every category that applies. Parties go under Company
+  Profile by what they are to the business (a firm that is both its accountant and its
+  tax agent gets both). The business's staff go under Employees; its directors and
+  shareholders, and the business's own page, under The company itself. A person at
+  another company goes where that company is.
+- **Government bodies:** one page each, whatever name a document uses: titled with the
+  body's name in `engine/menu.json`, with its other names from there in `aliases:`
+  (LHDN, Lembaga Hasil Dalam Negeri and Inland Revenue Board of Malaysia are one page),
+  and under `company-profile/government` only. A business whose name only holds a word
+  of a body's name (Hasil Laut Segar, Bomba Safety Services) is a business, with its own
+  page.
+- **Never** on `index.md`, `overview.md`, folder index pages, or project, decision,
+  update and product pages: they keep their own groups in the menu.
+- The engine adds the categories it can tell and never removes one. `menu_auto: false`
+  in a page's frontmatter keeps it away from that page's menu.
+
+The keys (`engine/menu.json` describes each):
+
+- **Company Profile:** `company-profile/company` The company itself;
+  `company-profile/employees` Employees; `company-profile/contractors` Contractors;
+  `company-profile/customers` Customers; `company-profile/suppliers` Suppliers;
+  `company-profile/company-secretary` Company Secretary; `company-profile/accountant`
+  Accountant; `company-profile/auditor` Auditor; `company-profile/tax-agent` Tax Agent;
+  `company-profile/lawyer` Lawyer; `company-profile/government` Government bodies;
+  `company-profile/banks` Banks & Financiers; `company-profile/landlords` Landlords;
+  `company-profile/insurers` Insurers
+- **Marketing:** `marketing/brand` Brand and logo; `marketing/campaigns` Campaigns and
+  promotions; `marketing/digital` Digital and social media; `marketing/research` Market
+  research; `marketing/events` Events; `marketing/materials` Marketing materials;
+  `marketing/agencies` Agencies
+- **Sales:** `sales/quotations` Quotations; `sales/orders` Orders and sales contracts;
+  `sales/price-lists` Price lists; `sales/tenders` Tenders and proposals; `sales/reports`
+  Sales reports; `sales/agents` Agents and commissions
+- **Customer Service:** `customer-service/enquiries` Enquiries and complaints;
+  `customer-service/returns` Warranties, returns and refunds;
+  `customer-service/service-levels` Service levels; `customer-service/feedback` Feedback
+  and reviews; `customer-service/faqs` FAQs; `customer-service/after-sales` After-sales
+  records
+- **Human Resources:** `human-resources/recruitment` Recruitment and onboarding;
+  `human-resources/contracts` Employment contracts; `human-resources/payroll` Payroll and
+  statutory contributions; `human-resources/leave` Leave and attendance;
+  `human-resources/policies` Policies and handbook; `human-resources/training` Training;
+  `human-resources/performance` Performance and discipline; `human-resources/permits`
+  Foreign worker permits
+- **Operation:** `operation/premises` Premises and facilities; `operation/equipment`
+  Equipment and assets; `operation/inventory` Inventory; `operation/purchasing`
+  Purchasing; `operation/logistics` Logistics and delivery; `operation/sops` Processes and
+  SOPs; `operation/it` IT and systems; `operation/safety` Health and safety
+- **Legal:** `legal/secretarial` Company secretarial; `legal/contracts` Contracts
+  register; `legal/licences` Licences and permits; `legal/ip` Intellectual property;
+  `legal/disputes` Disputes; `legal/compliance` Compliance
+- **Account:** `account/bookkeeping` Bookkeeping and ledgers; `account/receivables` Sales
+  invoices and receivables; `account/payables` Supplier bills and payables;
+  `account/reconciliations` Bank reconciliations; `account/tax` Tax filings;
+  `account/audit` Audit and financial statements
+- **Finance:** `finance/budgets` Budgets and forecasts; `finance/cash-flow` Cash flow;
+  `finance/loans` Loans and financing; `finance/facilities` Banking facilities;
+  `finance/investments` Investments and fixed assets; `finance/insurance` Insurance;
+  `finance/grants` Grants and incentives
 
 ---
 

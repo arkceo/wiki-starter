@@ -1,0 +1,156 @@
+{
+  "about": "The wiki's menu: sections in this order, each with its categories in order. A page appears in the menu under every \"section/category\" listed in its frontmatter menu: field; files never move. Branches with no page are hidden. Engine file: replaced by engine updates.",
+  "version": 1,
+  "sections": [
+    {
+      "key": "company-profile",
+      "title": "Company Profile",
+      "categories": [
+        {"key": "company", "title": "The company itself", "hint": "the business's own registration, directors and shareholders, licences, premises, bank accounts and key dates"},
+        {"key": "employees", "title": "Employees", "hint": "the business's staff, one page each, with their personal details"},
+        {"key": "contractors", "title": "Contractors", "hint": "freelancers, sub-contractors, outsourced and manpower providers"},
+        {"key": "customers", "title": "Customers", "hint": "the companies and people the business sells to"},
+        {"key": "suppliers", "title": "Suppliers", "hint": "the companies and people the business buys from"},
+        {"key": "company-secretary", "title": "Company Secretary", "hint": "the company secretary or secretarial firm"},
+        {"key": "accountant", "title": "Accountant", "hint": "the outside accountant or bookkeeping firm"},
+        {"key": "auditor", "title": "Auditor", "hint": "the external auditor"},
+        {"key": "tax-agent", "title": "Tax Agent", "hint": "the tax agent or tax adviser"},
+        {"key": "lawyer", "title": "Lawyer", "hint": "lawyers, solicitors and law firms"},
+        {"key": "government", "title": "Government bodies", "hint": "tax, statutory, licensing and local authorities"},
+        {"key": "banks", "title": "Banks & Financiers", "hint": "banks, lenders, leasing and hire-purchase companies"},
+        {"key": "landlords", "title": "Landlords", "hint": "the owners of the premises the business rents"},
+        {"key": "insurers", "title": "Insurers", "hint": "insurance and takaful providers"}
+      ]
+    },
+    {
+      "key": "marketing",
+      "title": "Marketing",
+      "categories": [
+        {"key": "brand", "title": "Brand and logo", "hint": "brand guidelines, logos, naming"},
+        {"key": "campaigns", "title": "Campaigns and promotions", "hint": "campaigns, promotions, discounts, vouchers"},
+        {"key": "digital", "title": "Digital and social media", "hint": "website, social media, online listings, advertising online"},
+        {"key": "research", "title": "Market research", "hint": "surveys, competitor and market studies"},
+        {"key": "events", "title": "Events", "hint": "events, launches, trade fairs, sponsorships"},
+        {"key": "materials", "title": "Marketing materials", "hint": "brochures, flyers, catalogues, menus, signage"},
+        {"key": "agencies", "title": "Agencies", "hint": "work with marketing, design and media agencies"}
+      ]
+    },
+    {
+      "key": "sales",
+      "title": "Sales",
+      "categories": [
+        {"key": "quotations", "title": "Quotations", "hint": "quotations the business gives its customers"},
+        {"key": "orders", "title": "Orders and sales contracts", "hint": "customer orders, sales agreements and contracts"},
+        {"key": "price-lists", "title": "Price lists", "hint": "the business's own prices and rate cards"},
+        {"key": "tenders", "title": "Tenders and proposals", "hint": "tenders, bids and proposals to customers"},
+        {"key": "reports", "title": "Sales reports", "hint": "sales figures, targets and reports"},
+        {"key": "agents", "title": "Agents and commissions", "hint": "sales agents, distributors, resellers and their commissions"}
+      ]
+    },
+    {
+      "key": "customer-service",
+      "title": "Customer Service",
+      "categories": [
+        {"key": "enquiries", "title": "Enquiries and complaints", "hint": "customer enquiries, complaints and how they were handled"},
+        {"key": "returns", "title": "Warranties, returns and refunds", "hint": "warranties, returns, exchanges, refunds"},
+        {"key": "service-levels", "title": "Service levels", "hint": "service standards, SLAs, response times"},
+        {"key": "feedback", "title": "Feedback and reviews", "hint": "customer feedback, ratings and reviews"},
+        {"key": "faqs", "title": "FAQs", "hint": "standard answers to common questions"},
+        {"key": "after-sales", "title": "After-sales records", "hint": "servicing, repairs and support after a sale"}
+      ]
+    },
+    {
+      "key": "human-resources",
+      "title": "Human Resources",
+      "categories": [
+        {"key": "recruitment", "title": "Recruitment and onboarding", "hint": "job adverts, applications, interviews, onboarding"},
+        {"key": "contracts", "title": "Employment contracts", "hint": "offer and appointment letters, employment contracts, resignations"},
+        {"key": "payroll", "title": "Payroll and statutory contributions", "hint": "payslips, salaries, EPF, SOCSO, EIS, PCB, HRDF"},
+        {"key": "leave", "title": "Leave and attendance", "hint": "leave, attendance, rosters, overtime"},
+        {"key": "policies", "title": "Policies and handbook", "hint": "staff policies, handbook, codes of conduct"},
+        {"key": "training", "title": "Training", "hint": "courses, certificates, HRDF-claimable training"},
+        {"key": "performance", "title": "Performance and discipline", "hint": "appraisals, warnings, disciplinary matters"},
+        {"key": "permits", "title": "Foreign worker permits", "hint": "work permits, visas, levies for foreign workers"}
+      ]
+    },
+    {
+      "key": "operation",
+      "title": "Operation",
+      "categories": [
+        {"key": "premises", "title": "Premises and facilities", "hint": "premises, outlets, leases, renovation, utilities"},
+        {"key": "equipment", "title": "Equipment and assets", "hint": "equipment, vehicles, maintenance, asset records"},
+        {"key": "inventory", "title": "Inventory", "hint": "stock, stock counts, wastage"},
+        {"key": "purchasing", "title": "Purchasing", "hint": "purchase orders, supplier quotations and terms, supplier performance"},
+        {"key": "logistics", "title": "Logistics and delivery", "hint": "deliveries, shipping, couriers, delivery orders"},
+        {"key": "sops", "title": "Processes and SOPs", "hint": "how work is done: procedures, checklists, standard operating procedures"},
+        {"key": "it", "title": "IT and systems", "hint": "software, systems, accounts, devices, IT support"},
+        {"key": "safety", "title": "Health and safety", "hint": "safety, hygiene, inspections, incidents"}
+      ]
+    },
+    {
+      "key": "legal",
+      "title": "Legal",
+      "categories": [
+        {"key": "secretarial", "title": "Company secretarial", "hint": "board and shareholder resolutions, AGMs, SSM filings, minutes"},
+        {"key": "contracts", "title": "Contracts register", "hint": "contracts and agreements with any party, their terms and renewals"},
+        {"key": "licences", "title": "Licences and permits", "hint": "business licences, permits, registrations, certifications"},
+        {"key": "ip", "title": "Intellectual property", "hint": "trademarks, patents, copyright, domain names"},
+        {"key": "disputes", "title": "Disputes", "hint": "claims, demand letters, court and tribunal matters"},
+        {"key": "compliance", "title": "Compliance", "hint": "personal data protection (PDPA) and other compliance"}
+      ]
+    },
+    {
+      "key": "account",
+      "title": "Account",
+      "categories": [
+        {"key": "bookkeeping", "title": "Bookkeeping and ledgers", "hint": "ledgers, journals, month-end close, accounting records"},
+        {"key": "receivables", "title": "Sales invoices and receivables", "hint": "invoices the business issues, receipts from customers, debtors"},
+        {"key": "payables", "title": "Supplier bills and payables", "hint": "supplier invoices and bills, payment vouchers, creditors"},
+        {"key": "reconciliations", "title": "Bank reconciliations", "hint": "bank statements and reconciliations"},
+        {"key": "tax", "title": "Tax filings", "hint": "income tax, SST, withholding tax returns and payments"},
+        {"key": "audit", "title": "Audit and financial statements", "hint": "audits, audited accounts, management accounts, financial results"}
+      ]
+    },
+    {
+      "key": "finance",
+      "title": "Finance",
+      "categories": [
+        {"key": "budgets", "title": "Budgets and forecasts", "hint": "budgets, forecasts, projections"},
+        {"key": "cash-flow", "title": "Cash flow", "hint": "cash flow, cash position, payment planning"},
+        {"key": "loans", "title": "Loans and financing", "hint": "loans, hire purchase, financing and repayments"},
+        {"key": "facilities", "title": "Banking facilities", "hint": "bank accounts, overdrafts, credit lines, bank guarantees"},
+        {"key": "investments", "title": "Investments and fixed assets", "hint": "investments, capital expenditure, fixed assets"},
+        {"key": "insurance", "title": "Insurance", "hint": "insurance and takaful policies, claims, renewals"},
+        {"key": "grants", "title": "Grants and incentives", "hint": "government grants, tax incentives, subsidies"}
+      ]
+    }
+  ],
+  "government": {
+    "about": "Government bodies: one page each, whatever name a document uses. The patterns catch bodies not listed; the list is generic, with Malaysia's filled in. A name a business could also go by (an everyday word such as Hasil, Bomba or Kastam, or two letters such as SC) is never an alias here: a party named exactly as an alias is put on the body's page.",
+    "patterns": ["ministry", "kementerian", "jabatan", "department of", "government", "kerajaan", "city council", "municipal council", "district council", "town council", "majlis bandaraya", "majlis perbandaran", "majlis daerah", "dewan bandaraya", "inland revenue", "internal revenue", "revenue service", "tax office", "tax authority", "customs", "kastam", "immigration", "imigresen", "registrar of companies", "companies commission", "suruhanjaya", "social security", "central bank"],
+    "bodies": [
+      {"name": "Inland Revenue Board of Malaysia", "aliases": ["LHDN", "LHDNM", "IRBM", "Lembaga Hasil Dalam Negeri", "Lembaga Hasil Dalam Negeri Malaysia", "Inland Revenue Board", "Inland Revenue", "IRB"]},
+      {"name": "Employees Provident Fund", "aliases": ["EPF", "KWSP", "Kumpulan Wang Simpanan Pekerja"]},
+      {"name": "Social Security Organisation", "aliases": ["SOCSO", "PERKESO", "Pertubuhan Keselamatan Sosial"]},
+      {"name": "Companies Commission of Malaysia", "aliases": ["SSM", "CCM", "Suruhanjaya Syarikat Malaysia"]},
+      {"name": "Royal Malaysian Customs Department", "aliases": ["JKDM", "RMCD", "Jabatan Kastam Diraja Malaysia", "Malaysian Customs", "Customs Department"]},
+      {"name": "Ministry of Housing and Local Government", "aliases": ["KPKT", "Kementerian Perumahan dan Kerajaan Tempatan"]},
+      {"name": "Human Resource Development Corporation", "aliases": ["HRD Corp", "HRDF", "PSMB", "Pembangunan Sumber Manusia Berhad"]},
+      {"name": "Bank Negara Malaysia", "aliases": ["BNM", "Central Bank of Malaysia"]},
+      {"name": "Department of Labour", "aliases": ["JTK", "JTKSM", "Jabatan Tenaga Kerja"]},
+      {"name": "Immigration Department of Malaysia", "aliases": ["JIM", "Jabatan Imigresen Malaysia", "Immigration Department"]},
+      {"name": "Ministry of Health Malaysia", "aliases": ["MOH", "KKM", "Kementerian Kesihatan Malaysia", "Ministry of Health"]},
+      {"name": "Department of Occupational Safety and Health", "aliases": ["DOSH", "JKKP", "Jabatan Keselamatan dan Kesihatan Pekerjaan"]},
+      {"name": "Fire and Rescue Department of Malaysia", "aliases": ["JBPM", "Jabatan Bomba dan Penyelamat Malaysia"]},
+      {"name": "Ministry of Domestic Trade and Cost of Living", "aliases": ["KPDN", "KPDNHEP", "Kementerian Perdagangan Dalam Negeri dan Kos Sara Hidup"]},
+      {"name": "Ministry of Investment, Trade and Industry", "aliases": ["MITI", "Kementerian Pelaburan, Perdagangan dan Industri"]},
+      {"name": "Malaysian Investment Development Authority", "aliases": ["MIDA", "Lembaga Pembangunan Pelaburan Malaysia"]},
+      {"name": "Personal Data Protection Department", "aliases": ["JPDP", "PDP", "Jabatan Perlindungan Data Peribadi"]},
+      {"name": "Intellectual Property Corporation of Malaysia", "aliases": ["MyIPO", "Perbadanan Harta Intelek Malaysia"]},
+      {"name": "Road Transport Department", "aliases": ["JPJ", "Jabatan Pengangkutan Jalan"]},
+      {"name": "Department of Islamic Development Malaysia", "aliases": ["JAKIM", "Jabatan Kemajuan Islam Malaysia"]},
+      {"name": "Securities Commission Malaysia", "aliases": ["Suruhanjaya Sekuriti"]},
+      {"name": "Kuala Lumpur City Hall", "aliases": ["DBKL", "Dewan Bandaraya Kuala Lumpur"]}
+    ]
+  }
+}

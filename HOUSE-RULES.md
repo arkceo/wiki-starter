@@ -7,9 +7,9 @@ the two disagree.
 Write rules in plain sentences. Keep each one short and specific. Examples:
 
 - Our company is Example Trading Ltd. "We", "us" and "the company" mean Example Trading.
-- Customers are filed under `companies/customers/`, suppliers under `companies/suppliers/`.
+- Example Logistics is a supplier, even when a document calls it a partner.
 - Amounts are in MYR unless a source says otherwise. Write them as `RM 1,250.00`.
-- Never record staff salaries in the wiki. Note only that a payslip exists.
+- Name staff as on their IC, with the name they go by in brackets.
 - Our financial year ends on 31 December.
 
 ## About us
