@@ -290,6 +290,11 @@ def main():
             wanted = {os.path.relpath(os.path.abspath(p.rstrip("\n")), root) for p in f if p.rstrip("\n")}
 
     from markitdown import MarkItDown
+    try:  # markitdown tells file types apart with onnxruntime, whose telemetry can abort Python
+        import onnxruntime
+        onnxruntime.disable_telemetry_events()
+    except Exception:
+        pass
     md = MarkItDown(enable_plugins=False)
     has_ocr = shutil.which("ocrmypdf") is not None
     has_tesseract = shutil.which("tesseract") is not None
@@ -465,3 +470,8 @@ def _summary(done, ocred, flagged, skipped, errors, deferred, out, limit=False):
 
 if __name__ == "__main__":
     main()
+    # Done: leave without the native libraries' teardown. onnxruntime can abort as Python
+    # exits (a Mac then says "Python quit unexpectedly"), after every mirror is written.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

@@ -310,7 +310,10 @@ class ClaudeStream:
         if not isinstance(msg, dict):
             return
         kind = msg.get("type")
-        content = (msg.get("message") or {}).get("content")
+        # "message" is a dict on assistant and user lines, but plain text on some others
+        # (an error or a notice): that line carries no content.
+        message = msg.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
         if kind == "assistant" and isinstance(content, list):
             started = False
             for block in content:
@@ -487,13 +490,13 @@ def follow(path, pid, label, poll=0.5, current_path="", batch_path=""):
                     continue
                 try:
                     stream.handle(json.loads(line))
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, AttributeError):
                     log(f"claude {label}: {line[:500]}")
         elif not alive:
             if buf.strip():
                 try:
                     stream.handle(json.loads(buf))
-                except (ValueError, TypeError):
+                except (ValueError, TypeError, AttributeError):
                     log(f"claude {label}: {buf.strip()[:500]}")
             break
         if current_path and stream.current != last:

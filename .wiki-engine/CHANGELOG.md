@@ -2,6 +2,15 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## No more "Python quit unexpectedly" after converting
+- **The crash report after converting documents is gone.** A library the converter uses
+  to tell file types apart could crash as the converter closed, after its work was done,
+  and the Mac then showed "Python quit unexpectedly". Your documents were never affected.
+  The converter now turns that library's usage reporting off and closes without it.
+- **Progress is no longer lost partway through a batch.** An unusual line in Claude's
+  output could stop the engine following that batch, so the Upload page stopped showing its
+  progress and the end of the batch went unrecorded. Such a line is now skipped.
+
 ## When API credit runs out
 - **The notice says so, and what to do:** "your Anthropic API credit has run out. Add
   credit at console.anthropic.com (Billing), then press Process now". It used to say the
