@@ -181,7 +181,9 @@ skill, say "wrap up" at the end of a conversation, and upload the file it gives 
 | "Nothing has moved for …" on the Upload page | Press **Restart processing** there. What is filed stays filed; the rest is read again. |
 | Update says "The wiki is processing files right now" | Wait until the Upload page shows **Idle**, then update again. If it already showed Idle, try again in 15 minutes. |
 | The Upload page says "Forbidden" | Reload the page. The wiki restarted, which an update does. |
-| "Claude could not run" | Paste the install line again and replace the sign-in. |
+| "Claude could not run: your Anthropic API credit has run out" | Add credit at console.anthropic.com (Billing), then press **Process now**. |
+| "Claude could not run: … usage limit …", "Anthropic's service is having trouble", "this Mac seems to be offline" | Nothing to do. The documents wait, and the next run tries again. |
+| "Claude could not run: it is not signed in" | Paste the install line again and replace the sign-in. |
 | "The local model could not run" | Paste the install line again. It checks and repairs the model. |
 | "The model on this Mac stopped responding" | Nothing to do: the rest is read on the next run. A file it stops on twice is set aside in `raw/_needs-review/`. |
 | A file says **Needs review** | It could not be read twice. Click the label: its question in the Review tab offers to read it again (add a note saying what it is), set it aside, or leave it. |

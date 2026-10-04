@@ -228,7 +228,9 @@ works*) follow the engine's instructions only while nobody has edited them.
 | Symptom | Fix |
 |---|---|
 | Nothing seems to happen after uploading a file | It is probably working: a batch of PDFs takes 5–15 minutes. The Upload page's live log shows each step; the full log is `~/Library/Logs/wiki-starter/runner.log`. If no "Wiki is working" notice appeared, allow notifications for *Script Editor* in System Settings → Notifications. |
-| "Wiki needs attention: Claude could not run" | The sign-in expired or was revoked. Run the install line again and choose to replace the sign-in. |
+| "Wiki needs attention: Claude could not run: your Anthropic API credit has run out" | The API key has no credit left. Add credit at console.anthropic.com (Billing), then press **Process now** on the Upload page. |
+| "Wiki needs attention: Claude could not run: … usage limit …" | Your plan's limit is used up for now. Nothing to do: the documents wait, and a run after it resets reads them. |
+| "Wiki needs attention: Claude could not run: it is not signed in" | The sign-in expired or was revoked. Run the install line again and choose to replace the sign-in. |
 | A file says **Needs review** | It could not be read twice. Click the label to open its question in the Review tab: read it again (with a note saying what it is), set it aside, or leave it. |
 | Scanned PDF summarised badly | OCR quality depends on the scan. The original is always kept and linked from the page. |
 | Open Wiki shows "being built" | The first build takes a minute or two. The page opens the wiki by itself when it is ready. |

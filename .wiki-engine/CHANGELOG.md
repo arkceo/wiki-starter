@@ -2,6 +2,13 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## When API credit runs out
+- **The notice says so, and what to do:** "your Anthropic API credit has run out. Add
+  credit at console.anthropic.com (Billing), then press Process now". It used to say the
+  documents would simply be read on the next run, which never happens until there is credit.
+- With Claude's classic reading, a session Claude refused (no credit, the plan's limit) is
+  no longer counted as a finished batch: the documents wait and nothing counts against them.
+
 ## Faster runs: page overviews only when they would change
 - **Overviews are written again only when what they summarise changed.** The short
   overview at the top of a company, person or topic page is no longer rewritten when its

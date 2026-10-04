@@ -484,6 +484,10 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
         continue
     if isinstance(m, dict) and m.get("type") == "result":
         outcome = m.get("subtype") or ""
+        # Claude Code reports a refused session (no API credit, the plan's limit) as a
+        # "success" that is an error.
+        if outcome == "success" and m.get("is_error"):
+            outcome = "error"
 print(outcome, end="")
 PYEOF
 }
@@ -579,7 +583,9 @@ claude_problem() { # reason
   case "$low" in
     *"failed to authenticate"*|*"invalid api key"*|*"api key is invalid"*|*"not logged in"*|*"/login"*|*"oauth token"*|*unauthori*|*authentication*)
       echo "Claude could not run: it is not signed in. Check your Anthropic sign-in (run the installer again), then press Process now on the Upload page." ;;
-    *"usage limit"*|*"limit reached"*|*"rate limit"*|*rate_limit*|*overloaded*|*"credit balance"*)
+    *"credit balance"*)   # waiting does not help: the API key needs credit
+      echo "Claude could not run: your Anthropic API credit has run out. Add credit at console.anthropic.com (Billing), then press Process now on the Upload page. Nothing is lost: the documents wait." ;;
+    *"usage limit"*|*"limit reached"*|*"rate limit"*|*rate_limit*|*overloaded*)
       echo "Claude could not run: $why. Nothing is lost: the documents wait, and the next run tries again." ;;
     *"api error: connection"*|*"connection error"*|*"connection refused"*|*econnrefused*|*enotfound*|*econnreset*|*etimedout*|*eai_again*|*"reach the api server"*|*"unable to connect"*|*"socket hang up"*|*"network error"*|*"fetch failed"*|*"request timed out"*)
       echo "Claude could not be reached: this Mac seems to be offline, or its connection to Anthropic failed ($why). Nothing is lost: the documents wait, and the next run tries again." ;;
