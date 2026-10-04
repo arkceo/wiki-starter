@@ -1418,9 +1418,12 @@ def claude_read(model, src, sysmsg, listing, titles, proj_list):
     log(f"reading {src} (Claude)")
     schema, dirs = extract_schema(titles, proj_list), [os.path.dirname(target)] if look else ()
     a = model.ask(sysmsg, user, schema, read_dirs=dirs)
-    if not (a.get("summary") or a.get("parties") or a.get("figures") or a.get("photo")) and len(body.strip()) > 200:
+    if (not (a.get("parties") or a.get("figures") or a.get("photo")) and len(a.get("summary") or []) < 2
+            and len(body.strip()) > 200):
         # An answer with nothing in it, for a document with text: it happens now and then
-        # (a large table), and a second ask nearly always gets the real answer.
+        # (a large table), and a second ask nearly always gets the real answer. A skeleton
+        # with one summary line and no parties or figures counts as empty: after a malformed
+        # first answer Claude sometimes sends just that.
         log(f"{src}: Claude's answer was empty; asking again")
         a = model.ask(sysmsg, user, schema, read_dirs=dirs)
     return {"src": src, "answer": a, "body": body, "truncated": truncated, "picture": picture,

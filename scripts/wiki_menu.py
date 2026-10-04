@@ -810,7 +810,7 @@ class Rules:
         if not person and (government_page(page.title) or self.body_alias(page)):
             return [PARTY + "government"]
         looks_official = not person and government_body(page.title)
-        cats, linked, own = set(), set(), self.own
+        cats, linked, own, ours = set(), set(), self.own, False
         # The relations the page itself shows (local_pages.plausible): a "supplier of" the
         # documents state the other way round more often is a misreading, here as there.
         for r in LP.plausible(self.rels.get(rel, [])):
@@ -821,6 +821,8 @@ class Rules:
                          "employee_of": {"employees"} if person else set(),
                          "director_of": {"company"} if person else set(),
                          "owner_of": {"company"}}.get(q, set())
+                ours = ours or (person and q in ("director_of", "owner_of", "employee_of", "signatory_for",
+                                                 "contact_for"))
             elif own and o == rel and s == own:
                 cats |= {"supplier_of": {"customers"}, "customer_of": {"suppliers"}, "tenant_of": {"landlords"},
                          "landlord_of": {"customers"}}.get(q, set())
@@ -838,6 +840,10 @@ class Rules:
             # company secretary adds, and a director or shareholder plainly called so.
             roles = (roles & {"company-secretary", "employees"}) | (
                 {"company"} if self.says_plainly(rel, page) else set())
+        elif ours:
+            # One of the business's own people: "signatory for the Buyer" names the side the
+            # business takes in that deal, not what the person is to it.
+            roles -= TRADE
         elif linked:
             # A person at another company goes where that company is; their own job title
             # counts only when that company is nowhere in the menu.
