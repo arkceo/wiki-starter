@@ -115,8 +115,15 @@ lists them.
   the same work valued at API prices, which the plan covers within its usage limits. The
   model on this Mac costs nothing.
 - **Process immediately:** press **Process now** on the Upload page.
-- **Ask questions** (Claude only): open the wiki folder in the Claude desktop app, or run
-  `claude` in Terminal inside that folder.
+- **Ask the wiki** (Claude only): click **Ask** beside Upload on any wiki page and type a
+  question ("What are our payment terms with Northwind?"). The wiki finds the pages that
+  matter on this Mac, sends only those to Claude, and checks every sentence of the answer
+  against its page before showing it, with a numbered link to each page. If the pages do
+  not say, it tells you so, and what to upload. A question costs about four US cents
+  (US$0.25 at most). **Save to the wiki** files a good answer as a page; **Correct it**
+  sends what is right, and the pages are corrected on the next run. The last 20 questions
+  stay on the Upload page's **Ask** tab. For longer work, open the wiki folder in the
+  Claude desktop app, or run `claude` in Terminal inside that folder.
 - **Review:** anything that needs your decision (two documents disagree, a fact is
   unclear, a file could not be read) waits in the Upload page's **Review** tab, with a
   count on the tab. Every **Needs review** label links to its question. Choose an answer
@@ -198,7 +205,8 @@ options compare are in `INSTALL.md`.
 - Your documents and the wiki: in `~/Wiki/<name>` on this Mac. Back it up with Time Machine.
 - The site: served only to this Mac. Nothing on your network can open it, and the wiki
   never looks for or connects to other devices on it.
-- Sent to Anthropic: the text Claude reads while it works, nothing else. With the model on
+- Sent to Anthropic: the text Claude reads while it works, and the questions you ask with
+  the pages that answer them, nothing else. With the model on
   this Mac, nothing at all.
 - Sent to TypeSafe, only if you save a TypeSafe key (Claude only): each review question,
   its answers, and the parts of the wiki and the document it is about; and, only if you

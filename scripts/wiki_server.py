@@ -28,6 +28,11 @@ Run by a LaunchAgent with KeepAlive. Two origins, on two ports of 127.0.0.1:
                        the answer, /api/review/score asks Jev again
     /api/actions       the suggested actions (scripts/wiki_actions.py); POST
                        /api/actions/update assigns one, or marks it done, dismissed or open
+    /api/ask           the last questions asked of the wiki and their answers; POST asks
+                       one (scripts/wiki_ask.py, run as its own process: it reads the pages
+                       here and asks Claude), POST /api/ask/save files an answer in the
+                       wiki and /api/ask/correct sends the owner's correction, each as an
+                       Update Packet
     /api/settings      GET, or POST to change, the settings in wiki.config.json the owner may
                        change here: the performance mode and the figures it sets
                        (scripts/wiki_settings.py), reading speed, title, company, reading
@@ -75,6 +80,7 @@ import urllib.parse
 WIKI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(WIKI_DIR, "scripts"))
 import wiki_actions  # noqa: E402
+import wiki_ask  # noqa: E402
 import wiki_estimate  # noqa: E402
 import wiki_events  # noqa: E402
 import wiki_jev  # noqa: E402
@@ -709,6 +715,51 @@ def actions_view():
     }
 
 
+ASK_LOCK = threading.Lock()   # one question at a time
+ASK_SECONDS = 2 * wiki_ask.TIMEOUT + 60
+
+
+def ask_view():
+    cfg = load_config()
+    return {"available": wiki_ask.available(cfg), "busy": ASK_LOCK.locked(),
+            "history": wiki_ask.history()}
+
+
+def ask(question):
+    """One question, answered by scripts/wiki_ask.py in its own process (it reads the
+    Keychain's sign-in and calls Claude; this server never does either). (status, body)."""
+    question = " ".join(str(question or "").split())
+    if not question:
+        return 400, {"ok": False, "message": "Type a question first."}
+    if len(question) > wiki_ask.QUESTION_CHARS:
+        return 400, {"ok": False, "message": f"Keep the question under {wiki_ask.QUESTION_CHARS} characters."}
+    if not wiki_ask.available(load_config()):
+        return 409, {"ok": False, "message": "This wiki reads with the model on this Mac, so nothing is sent to "
+                                             "Claude. Asking needs Claude."}
+    if not ASK_LOCK.acquire(blocking=False):
+        return 409, {"ok": False, "message": "Still answering the last question. Ask again when it is done."}
+    try:
+        try:
+            r = subprocess.run([sys.executable, os.path.join(WIKI_DIR, "scripts", "wiki_ask.py"), "ask"],
+                               input=json.dumps({"question": question}), capture_output=True, text=True,
+                               cwd=WIKI_DIR, timeout=ASK_SECONDS)
+            res = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else None
+        except subprocess.TimeoutExpired:
+            res = {"ok": False, "note": "No answer came in time. Try again, or ask a shorter question."}
+        except (OSError, ValueError, IndexError):
+            res = None
+        if not isinstance(res, dict):
+            return 500, {"ok": False, "message": "The question could not be answered (the asking step failed)."}
+        if not res.get("ok"):
+            return 200, {"ok": False, "message": res.get("note") or "The question could not be answered."}
+        rec = wiki_ask.remember(res)
+        wiki_events.emit("ask", msg=f"Answered a question from {res.get('pages', 0)} pages",
+                         cost=res.get("cost"), seconds=res.get("seconds"))
+        return 200, {"ok": True, "answer": rec}
+    finally:
+        ASK_LOCK.release()
+
+
 def rebuild_site():
     """Rebuild the site in the background (the title is built into its pages). A run in
     progress rebuilds at its end anyway; this one then exits at once."""
@@ -956,6 +1007,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self._send_json(200, actions_view())
                 if rel == "api/settings":
                     return self._send_json(200, settings_view())
+                if rel == "api/ask":
+                    return self._send_json(200, ask_view())
                 if rel == "api/events" and not head_only:
                     return self._stream_events(query)
                 return self._send_bytes(404, "text/plain; charset=utf-8", b"Not found\n", head_only)
@@ -1066,7 +1119,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._drain_small()
             return self._send_json(200, {"ok": True, "message": restart()})
         if rel in ("api/review/answer", "api/review/reopen", "api/review/score", "api/actions/update",
-                   "api/settings", "api/settings/jev-key"):
+                   "api/settings", "api/settings/jev-key", "api/ask", "api/ask/save", "api/ask/correct"):
             body = self._read_json()
             if body is None:
                 return self._send_json(400, {"ok": False, "message": "The request was not valid JSON."})
@@ -1091,6 +1144,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         res = wiki_review.answer(str(body.get("id") or ""), key=body.get("key") or "",
                                  text=str(body.get("text") or "")[:2000], by="owner")
         if res.get("queued"):
+            start_runner()
+        return self._send_json(200 if res["ok"] else 409, res)
+
+    def _ask(self, body):
+        st, res = ask(body.get("question"))
+        return self._send_json(st, res)
+
+    def _ask_save(self, body):
+        res = wiki_ask.save(str(body.get("id") or ""))
+        if res["ok"] and res.get("packet") and not res["message"].startswith("Already"):
+            start_runner()
+        return self._send_json(200 if res["ok"] else 409, res)
+
+    def _ask_correct(self, body):
+        res = wiki_ask.correct(str(body.get("id") or ""), str(body.get("text") or "")[:2000])
+        if res["ok"]:
             start_runner()
         return self._send_json(200 if res["ok"] else 409, res)
 

@@ -54,6 +54,16 @@ An employee's page holds their details as the documents give them (IC or passpor
 EPF and SOCSO numbers, address, phone, date of birth, salary), so they can be looked up.
 Anyone who can open the wiki on this Mac can see them.
 
+## Asking the wiki
+
+With Claude, click **Ask** beside Upload on any page and type a question. The wiki finds
+the pages that matter on this Mac and sends only those to Claude. Every sentence of the
+answer is checked against its page before it is shown, with a numbered link to each page.
+If the pages do not say, the answer says so, and what to upload. A question costs about four
+US cents, and never more than US$0.25. **Save to the wiki** files a good answer as
+its own page; **Correct it** sends what is right, and the pages are corrected on the next
+run. The last 20 questions stay on the Upload page's **Ask** tab.
+
 ## Questions for you: the Review tab
 
 When something needs a decision (two documents disagree, a fact is uncertain, or a file

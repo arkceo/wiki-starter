@@ -1,9 +1,9 @@
 @use "../../styles/variables.scss" as *;
 
-// "Upload", top right. On desktop it sits in the empty band above the right sidebar
-// (absolute, so it adds no height); on tablet and phone it is a right-aligned row at the
-// top of the page.
-header:has(> .upload-link:only-child) {
+// "Ask" and "Upload", top right. On desktop they sit in the empty band above the right
+// sidebar (absolute, so they add no height); on tablet and phone they are a right-aligned
+// row at the top of the page.
+header:has(> .wiki-links:only-child) {
   margin: 0.75rem 0 0;
   justify-content: flex-end;
 
@@ -12,31 +12,52 @@ header:has(> .upload-link:only-child) {
   }
 }
 
-.upload-link {
-  display: inline-flex;
+.wiki-links {
+  display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.5rem;
   margin-left: auto;
-  padding: 0.4rem 0.85rem;
-  border-radius: 8px;
-  border: 1px solid var(--secondary);
-  background: var(--secondary);
-  color: var(--light) !important;
-  font-family: var(--bodyFont);
-  font-size: 0.92rem;
-  font-weight: 600;
-  text-decoration: none;
-  line-height: 1.2;
-  transition: filter 0.15s ease;
-
-  &:hover {
-    filter: brightness(1.08);
-  }
 
   @media all and ($desktop) {
     position: absolute;
     top: 1.75rem;
     right: 2rem;
     z-index: 5;
+  }
+}
+
+.upload-link,
+.ask-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid var(--secondary);
+  font-family: var(--bodyFont);
+  font-size: 0.92rem;
+  font-weight: 600;
+  text-decoration: none;
+  line-height: 1.2;
+  transition:
+    filter 0.15s ease,
+    background 0.15s ease;
+}
+
+.upload-link {
+  background: var(--secondary);
+  color: var(--light) !important;
+
+  &:hover {
+    filter: brightness(1.08);
+  }
+}
+
+.ask-link {
+  background: transparent;
+  color: var(--secondary) !important;
+
+  &:hover {
+    background: var(--highlight);
   }
 }

@@ -236,6 +236,11 @@ Read `index.md` first, drill into pages, follow wikilinks, and answer with citat
 If the answer is itself valuable, offer to file it as a page. Append a query line to
 `log.md`.
 
+The owner can also ask from the Upload page's Ask tab. Its packets arrive in `raw/inbox/`
+named `ask-*.md`: an **Answer** packet asks for the answer to be filed as its own page
+(`type: summary`) citing the pages it came from; a **Correction** packet carries the
+owner's own statement of what is right. Ingest both like any other packet.
+
 ## Operation: LINT
 
 On "lint the wiki": check for contradictions, stale or superseded claims, orphan pages,

@@ -2,6 +2,18 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Ask the wiki
+- **Ask your wiki a question.** Every wiki page has an **Ask** button beside Upload. Type
+  a question ("Who is our tax agent?") and get a short answer with a numbered link to each
+  page it came from. Needs Claude.
+- **Answers are checked.** Only the pages that matter are sent to Claude, and every
+  sentence is checked against its page before it is shown. If the wiki does not say, the
+  answer says so, and what to upload.
+- **About four US cents a question**, never more than US$0.25.
+- **Save to the wiki** files a good answer as a page. **Correct it** sends what is right,
+  and the pages are corrected on the next run.
+- The last 20 questions stay on the Upload page's new **Ask** tab.
+
 ## No more "Python quit unexpectedly" after converting
 - **The crash report after converting documents is gone.** A library the converter uses
   to tell file types apart could crash as the converter closed, after its work was done,

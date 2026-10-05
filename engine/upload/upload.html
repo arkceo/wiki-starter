@@ -194,8 +194,8 @@
   .count:empty { display: none; }
   #files-panel:not([data-view="files"]) #files, #files-panel:not([data-view="files"]) #legend,
   #files-panel:not([data-view="files"]) #show-all, #files-panel:not([data-view="review"]) #review-view,
-  #files-panel:not([data-view="actions"]) #actions-view { display: none; }
-  #review-view, #actions-view { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+  #files-panel:not([data-view="actions"]) #actions-view, #files-panel:not([data-view="ask"]) #ask-view { display: none; }
+  #review-view, #actions-view, #ask-view { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
   .review-head { display: flex; align-items: center; gap: .45rem .9rem; flex-wrap: wrap; padding: .55rem 1rem;
                  border-bottom: 1px solid var(--line); font-size: .85rem; }
   #jev-state { flex: 1 1 14rem; }
@@ -291,6 +291,31 @@
   .ac-done .ic { color: var(--ok); } .ac-done.dismissed .ic { color: var(--muted); }
   .ac-done .who { color: var(--muted); font-size: .8rem; grid-column: 2; }
 
+  /* Ask: a question about the business, answered from the wiki's own pages. */
+  .ask-form { display: flex; gap: .5rem; align-items: flex-end; padding: .7rem 1rem .4rem; }
+  .ask-form textarea { flex: 1 1 auto; min-width: 0; font: inherit; padding: .5rem .65rem; border: 1px solid var(--line);
+                       border-radius: 10px; background: var(--inset); color: var(--text); resize: vertical; min-height: 2.6rem; }
+  .ask-form textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  #ask-note { font-size: .8rem; margin: 0; padding: 0 1rem .55rem; border-bottom: 1px solid var(--line); }
+  #ask-note.bad { color: var(--bad); }
+  #ask-list { list-style: none; margin: 0; padding: 0; overflow: auto; flex: 1 1 auto; min-height: 0; }
+  #ask-list li.empty { padding: 1.5rem 1rem; color: var(--muted); text-align: center; }
+  .qa { padding: .8rem 1rem .9rem; border-bottom: 1px solid var(--line); }
+  .qa-q { font-weight: 700; margin: 0 0 .35rem; overflow-wrap: anywhere; }
+  .qa-a p { margin: 0 0 .45rem; overflow-wrap: anywhere; }
+  .qa-a sup a { text-decoration: none; font-weight: 700; font-size: .72rem; padding: 0 .15rem; }
+  .qa-none { color: var(--muted); margin: 0 0 .45rem; }
+  .qa-src { display: flex; flex-wrap: wrap; gap: .1rem .8rem; font-size: .82rem; margin: 0 0 .45rem; }
+  .qa-meta { font-size: .78rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: .3rem .9rem; align-items: center; }
+  .qa-meta button { font-size: .8rem; padding: .2rem .6rem; }
+  .qa-fix { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .5rem; }
+  .qa-fix textarea { flex: 1 1 16rem; font: inherit; font-size: .88rem; padding: .4rem .55rem; border: 1px solid var(--line);
+                     border-radius: 8px; background: var(--inset); color: var(--text); min-height: 2.4rem; }
+  .qa.pending .qa-none::before { content: ""; display: inline-block; width: .7rem; height: .7rem; margin-right: .45rem;
+                                 border-radius: 50%; border: 2px solid var(--accent); border-right-color: transparent;
+                                 animation: spin 1s linear infinite; vertical-align: -.05rem; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
   /* Settings */
   .gear { background: transparent; color: var(--accent); border: 1px solid var(--line); padding: .3rem .75rem; font-weight: 600; }
   dialog#settings { border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(40rem, calc(100vw - 32px));
@@ -365,6 +390,7 @@
   @media (prefers-reduced-motion: reduce) {
     .steps span.active::after { animation: none; background: var(--accent); opacity: .45; background-size: 100% 100%; }
     #state.busy::before { animation: none; }
+    .qa.pending .qa-none::before { animation: none; }
     .add, .add-icon { transition: none; } .add.over { transform: none; }
   }
 </style>
@@ -420,20 +446,22 @@
     <input type="file" id="folder-input" webkitdirectory multiple>
   </section>
 
-  <div class="tabs" role="tablist" aria-label="Files, review, actions or log">
+  <div class="tabs" role="tablist" aria-label="Files, review, actions, ask or log">
     <button type="button" role="tab" data-tab="files" data-view="files" aria-selected="true">Files</button>
     <button type="button" role="tab" data-tab="files" data-view="review" aria-selected="false">Review<span class="count review-count"></span></button>
     <button type="button" role="tab" data-tab="files" data-view="actions" aria-selected="false">Actions<span class="count action-count"></span></button>
+    <button type="button" role="tab" data-tab="files" data-view="ask" aria-selected="false">Ask</button>
     <button type="button" role="tab" data-tab="log" aria-selected="false">Live log</button>
   </div>
 
   <section class="card panel" id="files-panel" data-view="files" aria-labelledby="files-h">
     <div class="panel-head">
-      <h2 class="sr" id="files-h">Files, review and actions</h2>
-      <div class="ptabs" role="tablist" aria-label="Files, review or actions">
+      <h2 class="sr" id="files-h">Files, review, actions and questions</h2>
+      <div class="ptabs" role="tablist" aria-label="Files, review, actions or ask">
         <button type="button" role="tab" data-view="files" aria-selected="true">Files <span class="muted" id="files-count"></span></button>
         <button type="button" role="tab" data-view="review" aria-selected="false">Review<span class="count review-count"></span></button>
         <button type="button" role="tab" data-view="actions" aria-selected="false">Actions<span class="count action-count"></span></button>
+        <button type="button" role="tab" data-view="ask" aria-selected="false">Ask</button>
       </div>
       <button type="button" class="linkish" id="show-all" hidden>Show all files</button>
     </div>
@@ -453,6 +481,17 @@
     <div id="actions-view">
       <div class="review-head"><span id="actions-state" class="muted"></span></div>
       <ul id="actions-list" aria-live="off"></ul>
+    </div>
+    <div id="ask-view">
+      <form class="ask-form" id="ask-form">
+        <label class="sr" for="ask-q">Your question</label>
+        <textarea id="ask-q" rows="2" maxlength="500"
+          placeholder="Ask anything about the business: payment terms, who supplies what, when something is due…"></textarea>
+        <button type="submit" id="ask-go">Ask</button>
+      </form>
+      <p class="muted" id="ask-note">Answers come only from your wiki's pages, with a link to each. The question and the
+        pages it needs (personal details on them included) are sent to Claude.</p>
+      <ul id="ask-list" aria-live="polite"></ul>
     </div>
   </section>
 
@@ -1758,6 +1797,7 @@
     else if (ma) showAction(decodeURIComponent(ma[1]))
     else if (location.hash === "#review") setTab("files", "review")
     else if (location.hash === "#actions") setTab("files", "actions")
+    else if (location.hash === "#ask") showAsk()
   })
 
   for (const b of document.querySelectorAll("#mode-seg button")) b.onclick = async () => {
@@ -2071,12 +2111,166 @@
     if (r.ok) { fillSettings(r.settings); setMsg($("key-msg"), r.message, "ok"); loadReviewSoon() }
   }
 
+  // ------------------------------------------------------------------ ask
+  // A question about the business, answered from the wiki's own pages: every sentence
+  // links to the page it came from (scripts/wiki_ask.py checks each one against its page).
+  // A good answer can be filed in the wiki; a wrong one corrected. Both become Update
+  // Packets, applied on the next run.
+  let asks = { history: [], available: true }, asking = null, askTimer = 0
+  const askList = $("ask-list"), askQ = $("ask-q"), askNote = $("ask-note")
+  const ASK_NOTE = askNote.textContent
+  const money = (v) => typeof v === "number" ? (v > 0 && v < 0.01 ? "under US$0.01" : "US$" + v.toFixed(2)) : ""
+  function askCard(rec, pending) {
+    const li = document.createElement("li"); li.className = "qa" + (pending ? " pending" : "")
+    if (rec.id) li.id = "ask-" + rec.id
+    const q = document.createElement("p"); q.className = "qa-q"; q.textContent = rec.question; li.append(q)
+    if (pending) {
+      const p = document.createElement("p"); p.className = "qa-none"
+      const tick = () => { p.textContent = `Reading your wiki… ${Math.max(0, Math.round((Date.now() - pending) / 1000))} s` }
+      tick(); li._tick = tick
+      li.append(p); return li
+    }
+    const pages = []   // page path -> its number in this answer
+    const ans = document.createElement("div"); ans.className = "qa-a"
+    let para = null
+    for (const s of rec.sentences || []) {
+      if (!para || s.new_paragraph) { para = document.createElement("p"); ans.append(para) }
+      let n = pages.indexOf(s.page)
+      if (n < 0) { pages.push(s.page); n = pages.length - 1 }
+      if (para.childNodes.length) para.append(" ")
+      para.append(s.text)
+      const sup = document.createElement("sup"), a = document.createElement("a")
+      a.href = pageUrl(s.page); a.target = "_blank"; a.rel = "noopener"; a.textContent = String(n + 1)
+      a.title = s.title || humanPage(s.page)
+      sup.append(a); para.append(sup)
+    }
+    if (ans.childNodes.length) li.append(ans)
+    if (!(rec.sentences || []).length) {
+      const p = document.createElement("p"); p.className = "qa-none"
+      p.textContent = rec.note || "The wiki does not say."
+      if (rec.suggest) p.textContent += ` Upload ${rec.suggest.replace(/^(the|a|an) /i, (m) => m.toLowerCase())} and ask again.`
+      li.append(p)
+    }
+    if (pages.length) {
+      const src = document.createElement("div"); src.className = "qa-src"
+      pages.forEach((p, i) => {
+        const a = document.createElement("a"); a.href = pageUrl(p); a.target = "_blank"; a.rel = "noopener"; a.title = p
+        const s = (rec.sources || []).find((x) => x.page === p)
+        a.textContent = `${i + 1}. ${s && s.title ? s.title : humanPage(p)}`
+        src.append(a)
+      })
+      li.append(src)
+    }
+    const meta = document.createElement("div"); meta.className = "qa-meta"
+    const bits = []
+    if (rec.t) bits.push(new Date(rec.t).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }))
+    if (typeof rec.cost === "number") bits.push(money(rec.cost))
+    if (rec.seconds) bits.push(`${rec.seconds} s`)
+    if (rec.pages) bits.push(`${rec.pages} page${rec.pages === 1 ? "" : "s"} read`)
+    const info = document.createElement("span"); info.textContent = bits.join(" · ")
+    info.title = "With a Claude plan, the cost is the same work valued at API prices: the plan covers it."
+    meta.append(info)
+    if ((rec.sentences || []).length) {
+      if (rec.saved) { const d = document.createElement("span"); d.textContent = "✓ Sent to the wiki"; meta.append(d) }
+      else {
+        const b = document.createElement("button"); b.type = "button"; b.className = "secondary"; b.textContent = "Save to the wiki"
+        b.title = "File this answer as a page in the wiki, linked to the pages it came from"
+        b.onclick = () => askAct("/api/ask/save", { id: rec.id }, b)
+        meta.append(b)
+      }
+    }
+    if (rec.corrected) { const d = document.createElement("span"); d.textContent = "✓ Correction sent"; meta.append(d) }
+    else if (rec.id) {
+      const b = document.createElement("button"); b.type = "button"; b.className = "secondary"; b.textContent = "Correct it"
+      b.title = "Say what is right; the wiki's pages are corrected on the next run"
+      b.onclick = () => {
+        if (li.querySelector(".qa-fix")) return
+        const f = document.createElement("div"); f.className = "qa-fix"
+        const t = document.createElement("textarea"); t.maxLength = 2000; t.placeholder = "What is right? For example: the payment terms are 30 days since the new agreement."
+        t.dataset.id = rec.id
+        const send = document.createElement("button"); send.type = "button"; send.textContent = "Send the correction"
+        send.onclick = () => { if (t.value.trim()) askAct("/api/ask/correct", { id: rec.id, text: t.value }, send); else t.focus() }
+        f.append(t, send); li.append(f); t.focus()
+        return t
+      }
+      li._fix = b.onclick
+      meta.append(b)
+    }
+    li.append(meta)
+    return li
+  }
+  function renderAsk() {
+    // A correction being written survives the list being drawn again.
+    const drafts = [...askList.querySelectorAll(".qa-fix textarea")].map((t) => [t.dataset.id, t.value, t === document.activeElement])
+    askList.replaceChildren()
+    $("ask-go").disabled = !!asking || !asks.available
+    askQ.disabled = !asks.available
+    if (!asks.available) {
+      askNote.textContent = "This wiki reads with the model on this Mac, so nothing is sent to Claude. Asking needs Claude."
+    }
+    if (asking) askList.append(askCard({ question: asking.q }, asking.t0))
+    for (const rec of asks.history || []) askList.append(askCard(rec))
+    const active = document.activeElement
+    for (const [id, text, focused] of drafts) {
+      const li = document.getElementById("ask-" + id)
+      const t = li && li._fix && li._fix()
+      if (t) { t.value = text; if (!focused) t.blur() }
+    }
+    if (active && active !== document.body && document.contains(active)) active.focus({ preventScroll: true })
+    if (!askList.childNodes.length) {
+      const li = document.createElement("li"); li.className = "empty"
+      li.textContent = asks.available ? "Ask a question about the business. The answer links to the pages it came from." : ""
+      if (li.textContent) askList.append(li)
+    }
+  }
+  function askSay(text, bad) {
+    askNote.textContent = text || ASK_NOTE; askNote.classList.toggle("bad", !!bad)
+    clearTimeout(askNote._t); if (text) askNote._t = setTimeout(() => askSay(""), 8000)
+  }
+  async function loadAsk() {
+    const r = await api("GET", "/api/ask")
+    if (r._status !== 200) return
+    asks = { history: r.history || [], available: r.available !== false }
+    renderAsk()
+  }
+  async function askAct(path, body, btn) {
+    btn.disabled = true
+    const r = await api("POST", path, body)
+    btn.disabled = false
+    askSay(r.message || (r.ok ? "" : "That did not work."), !r.ok)
+    if (r.ok) loadAsk()
+  }
+  $("ask-form").onsubmit = async (ev) => {
+    ev.preventDefault()
+    const q = askQ.value.trim()
+    if (!q || asking) { if (!q) askQ.focus(); return }
+    asking = { q, t0: Date.now() }
+    askSay("")
+    // Only the waiting line ticks: a correction being typed on another answer stays put.
+    askTimer = setInterval(() => { const li = askList.querySelector("li.qa.pending"); if (li && li._tick) li._tick() }, 1000)
+    renderAsk()
+    const r = await api("POST", "/api/ask", { question: q })
+    clearInterval(askTimer); asking = null
+    if (r.ok && r.answer) {
+      askQ.value = ""
+      asks.history = [r.answer].concat((asks.history || []).filter((x) => x.id !== r.answer.id)).slice(0, 20)
+    } else askSay(r.message || "The question could not be answered.", true)
+    renderAsk()
+    if (r.ok) askList.scrollTop = 0
+  }
+  askQ.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); $("ask-form").requestSubmit() }
+  })
+  function showAsk() { setTab("files", "ask"); if (!askQ.disabled) askQ.focus({ preventScroll: true }) }
+
   connect()
   poll()
   render()
   loadReview()
   loadActions()
+  loadAsk()
   if (/^#(review|action)/.test(location.hash)) window.dispatchEvent(new HashChangeEvent("hashchange"))
+  if (location.hash === "#ask") showAsk()
 })()
 </script>
 </body>
