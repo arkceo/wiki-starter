@@ -2,6 +2,16 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## Signing in no longer fails on a locked Keychain
+- **The installer unlocks your Keychain when it has to.** On some Macs the login keychain
+  stays locked, and the installer then stopped with "Could not save the token in the
+  Keychain". It now says why, asks for the password you use to log in to the Mac, unlocks
+  the Keychain and saves again.
+- **A pasted key or token is read cleanly.** Stray characters some Terminals add around a
+  paste are removed before the token is checked.
+- **Pasting a key at "Choose 1 or 2" no longer ends the install.** The installer picks the
+  right sign-in for what was pasted, or asks again for 1 or 2.
+
 ## Ask the wiki
 - **Ask your wiki a question.** Every wiki page has an **Ask** button beside Upload. Type
   a question ("Who is our tax agent?") and get a short answer with a numbered link to each

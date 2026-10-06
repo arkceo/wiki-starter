@@ -98,7 +98,19 @@ read_secret() { # "question" -> stdout
   IFS= read -rs answer < /dev/tty || answer=""
   while IFS= read -rs -t 1 more < /dev/tty; do answer="$answer$more"; done
   printf '\n' > /dev/tty
-  printf '%s' "$answer" | tr -d '[:space:]'
+  clean_secret "$answer"
+}
+
+# A pasted secret without what the terminal wraps around it: a program that ran just
+# before (claude setup-token) can leave bracketed paste on, and a paste then arrives as
+# ESC[200~...ESC[201~. Those markers, other control characters and spaces go.
+clean_secret() { # text -> stdout
+  printf '%s' "$1" | LC_ALL=C sed $'s/\x1b\\[20[01]~//g' | LC_ALL=C tr -d '[:space:][:cntrl:]'
+}
+
+# A secret as it may appear in the log: its start and its length, never the rest.
+mask_secret() { # text -> stdout
+  printf '%s' "$1" | LC_ALL=C sed -E 's/(sk-ant-[a-z]{3})[A-Za-z0-9_-]*/\1***/g'
 }
 
 ask_secret() { # VAR "question"
@@ -398,7 +410,22 @@ PYEOF
 # ------------------------------------------------------------ 5 anthropic ------
 keychain_has() { security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$1" >/dev/null 2>&1; }
 keychain_put() { # account secret [label]
-  security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a "$1" -l "${3:-Wiki ($1)}" -w "$2" >/dev/null 2>&1
+  local err
+  err=$(security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a "$1" -l "${3:-Wiki ($1)}" -w "$2" 2>&1 >/dev/null) \
+    && return 0
+  log "Keychain: could not save $1: $(mask_secret "$err")"
+  log "Keychain: $(security default-keychain 2>&1 | tr -d '"' | sed 's/^ *//')"
+  # The usual cause is a locked login keychain (its password no longer the Mac's own, or
+  # a session where macOS cannot ask): unlock it here, with the Mac's password, and retry.
+  have_tty || return 1
+  warn "macOS did not let the installer use your Keychain ($(printf '%s' "$err" | tail -n 1 | sed 's/.*: //' | cut -c1-120))."
+  info "Unlocking it: type the password you use to log in to this Mac (it stays hidden)."
+  security unlock-keychain < "$(terminal_device)" > "$(terminal_device)" 2>&1 \
+    || { log "Keychain: unlock failed"; return 1; }
+  err=$(security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a "$1" -l "${3:-Wiki ($1)}" -w "$2" 2>&1 >/dev/null) \
+    && { log "Keychain: saved $1 after unlocking"; return 0; }
+  log "Keychain: could not save $1 after unlocking: $(mask_secret "$err")"
+  return 1
 }
 keychain_del() { security delete-generic-password -s "$KEYCHAIN_SERVICE" -a "$1" >/dev/null 2>&1; }
 
@@ -410,8 +437,10 @@ check_api_key() { # key -> http status of a free models listing
 check_oauth_token() { # token -> 0 if claude answers with it
   local out
   out=$(cd "${TMPDIR:-/tmp}" && env -u ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN="$1" \
-    claude -p "Reply with exactly: OK" --max-turns 1 2>/dev/null < /dev/null)
-  printf '%s' "$out" | grep -q "OK"
+    claude -p "Reply with exactly: OK" --max-turns 1 2>&1 < /dev/null)
+  printf '%s' "$out" | grep -q "OK" && return 0
+  log "token check (${#1} characters, starts $(mask_secret "$(printf '%s' "$1" | cut -c1-14)")): $(mask_secret "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)")"
+  return 1
 }
 
 anthropic_signin() {
@@ -425,12 +454,27 @@ anthropic_signin() {
   info "Claude needs an Anthropic account to read your documents. Choose one:"
   info "  1) Claude subscription (Pro or Max): sign in through the browser"
   info "  2) Anthropic API key (pay as you go, from console.anthropic.com)"
-  local choice="${WIKI_AUTH:-}"
+  local choice="${WIKI_AUTH:-}" pasted=""
   case "$choice" in subscription) choice=1 ;; apikey) choice=2 ;; skip) choice=s ;; esac
-  ask choice "Choose 1 or 2" "1"
+  while :; do
+    ask choice "Choose 1 or 2" "1"
+    case "$choice" in
+      1|2|s) break ;;
+      *sk-ant-*)
+        # A key or token pasted here instead of below: use it, and say it was on screen.
+        pasted=$(clean_secret "$choice")
+        warn "That was a key, and it showed on the screen. It is used now; if others can see"
+        info "this window, make a new one later and run the installer again."
+        case "$pasted" in sk-ant-oat*) choice=1 ;; *) choice=2 ;; esac
+        break ;;
+    esac
+    [ -z "${WIKI_AUTH:-}" ] && have_tty || die "Please choose 1 or 2."
+    warn "Type 1 or 2, then press Return."
+    choice=""
+  done
   case "$choice" in
     1)
-      local token="${WIKI_OAUTH_TOKEN:-}"
+      local token="${WIKI_OAUTH_TOKEN:-$pasted}"
       if [ -z "$token" ]; then
         info "A browser window opens. Sign in, approve, then come back here."
         info "Claude Code prints a long token starting with sk-ant-oat. Copy all of it:"
@@ -463,7 +507,7 @@ anthropic_signin() {
       ok "subscription sign-in stored in the Keychain"
       ;;
     2)
-      local key="${WIKI_API_KEY:-}"
+      local key="${WIKI_API_KEY:-$pasted}"
       if [ -z "$key" ]; then
         info "Create a key at https://console.anthropic.com/settings/keys"
         info "and set a monthly spend limit there."
