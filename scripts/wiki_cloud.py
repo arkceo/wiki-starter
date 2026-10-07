@@ -12,6 +12,9 @@ Anthropic sign-in is stored anywhere.
       one's version differs, this engine's files brought into it the way the Mac updater
       does; never touches wiki/, raw/, archive/ or the settings. Then the site is built if
       it has never been.
+  wiki_cloud.py cloud-image [--engine DIR]
+      At image build (cloud/Dockerfile): the cloud starter pages in cloud/seeds/ laid over
+      the Mac ones, with the engine's bookkeeping kept true.
   wiki_cloud.py serve --wiki DIR
       The viewer (scripts/wiki_server.py, on 127.0.0.1 as on a Mac) kept running, and the
       runner started whenever the queue changes and every 15 minutes, as the LaunchAgents
@@ -25,6 +28,7 @@ Environment:
                         (e.g. /wiki and /wiki/_app); passed to the viewer and the site build
   WIKI_CREDITS_URL, WIKI_CREDITS_TOKEN
                         the credits service Claude is reached through (scripts/wiki_claude.py)
+  WIKI_THEME            the site's colours: "oeru", or unset for the engine's own
 
 Standard library only.
 """
@@ -102,6 +106,84 @@ def write_config(wiki, title, company):
             pass
 
 
+THEMES = ("", "oeru")
+
+
+def set_theme(wiki):
+    """The site's colours from WIKI_THEME ("oeru", or unset for the engine's own), kept in
+    wiki.config.json, which quartz.config.ts reads. A Mac wiki never sets it."""
+    theme = os.environ.get("WIKI_THEME", "")
+    if theme not in THEMES:
+        raise SystemExit(f"unknown WIKI_THEME {theme!r}")
+    p = os.path.join(wiki, "wiki.config.json")
+    try:
+        cfg = json.load(open(p, encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if cfg.get("theme", "") == theme:
+        return
+    if theme:
+        cfg["theme"] = theme
+    else:
+        cfg.pop("theme", None)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    for d in ("public", ".quartz-cache"):
+        shutil.rmtree(os.path.join(wiki, d), ignore_errors=True)   # rebuilt in the new colours
+
+
+def cloud_image(engine, seeds):
+    """At image build (cloud/Dockerfile): lay the cloud starter pages (cloud/seeds/) over
+    the Mac ones in this engine, and keep its bookkeeping true, so setup and the runner
+    carry them like any engine file:
+      · engine/seed-history.txt gets their hashes, so a page nobody edited is replaced and
+        one somebody edited never is;
+      · .wiki-engine/files.txt gets their hashes, so setup brings them into a wiki that
+        already exists, as an engine update;
+      · .wiki-engine/VERSION gets "+cloud", so setup sees an engine it has not had yet."""
+    import hashlib
+
+    def sha(path):
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    laid = []
+    for d, _, files in os.walk(seeds):
+        for name in files:
+            src = os.path.join(d, name)
+            rel = "engine/seeds/" + os.path.relpath(src, seeds).replace(os.sep, "/")
+            dest = os.path.join(engine, rel)
+            if not os.path.isfile(dest):
+                raise SystemExit(f"cloud-image: the engine has no {rel} to replace")
+            shutil.copyfile(src, dest)
+            laid.append(rel)
+    if not laid:
+        raise SystemExit("cloud-image: no cloud starter pages")
+    with open(os.path.join(engine, "engine", "seed-history.txt"), "a", encoding="utf-8") as hist:
+        for rel in sorted(laid):
+            hist.write(f"{sha(os.path.join(engine, rel))}  {rel[len('engine/seeds/'):]}\n")
+    files_path = os.path.join(engine, ".wiki-engine", "files.txt")
+    changed = set(laid) | {"engine/seed-history.txt"}
+    lines, seen = [], set()
+    for line in open(files_path, encoding="utf-8"):
+        h, sep, path = line.rstrip("\n").partition("  ")
+        if sep and path in changed:
+            line = f"{sha(os.path.join(engine, path))}  {path}\n"
+            seen.add(path)
+        lines.append(line)
+    if seen != changed:
+        raise SystemExit(f"cloud-image: files.txt does not list {sorted(changed - seen)}")
+    with open(files_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    vpath = os.path.join(engine, ".wiki-engine", "VERSION")
+    v = version(engine)
+    if not v.endswith("+cloud"):
+        with open(vpath, "w", encoding="utf-8") as f:
+            f.write(v + "+cloud\n")
+    say(f"cloud starter pages laid: {len(laid)}")
+
+
 def runner_env(wiki):
     env = dict(os.environ)
     env.setdefault("WIKI_LOG_DIR", os.path.join(wiki, ".wiki-engine", "logs"))
@@ -132,6 +214,7 @@ def setup(wiki, title="", company=""):
     elif have != new:
         say(f"updating the engine from {have} to {new}")
         update(wiki)
+    set_theme(wiki)
     link_deps(wiki)
     if not os.path.isfile(os.path.join(wiki, "public", "index.html")):
         say("building the site")
@@ -261,12 +344,17 @@ def serve(wiki):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Run the wiki behind Nucleus Cloud.")
-    ap.add_argument("command", choices=["setup", "serve"])
-    ap.add_argument("--wiki", required=True, help="the wiki's folder")
+    ap = argparse.ArgumentParser(description="Run the wiki on a server (Nucleus Cloud, oeru).")
+    ap.add_argument("command", choices=["setup", "serve", "cloud-image"])
+    ap.add_argument("--wiki", help="the wiki's folder (setup, serve)")
+    ap.add_argument("--engine", default=ENGINE, help="the engine to lay the cloud pages in (cloud-image)")
     ap.add_argument("--title", default="")
     ap.add_argument("--company", default="")
     a = ap.parse_args(argv)
+    if a.command == "cloud-image":
+        return cloud_image(a.engine, os.path.join(a.engine, "cloud", "seeds")) or 0
+    if not a.wiki:
+        ap.error("--wiki is required")
     if a.command == "setup":
         return setup(a.wiki, a.title, a.company)
     return serve(a.wiki)

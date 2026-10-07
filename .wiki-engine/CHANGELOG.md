@@ -2,6 +2,15 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## The cloud version's code is public too
+- **Nothing changes on your Mac.** Your wiki gains a small `cloud/` folder it never uses.
+- **Everything oeru runs on your documents is now here, in the open.** The job that reads
+  a cloud wiki's files (`cloud/job.py`), the image it runs in (`cloud/Dockerfile`), how
+  that image is built (`cloud/buildspec.yml`) and the cloud wiki's starter pages are part
+  of this release, so a company using oeru can read and rebuild the exact code that
+  touches its documents.
+- **A cloud wiki can wear oeru's colours.** Set by the service, never on a Mac.
+
 ## The engine can also run on a server
 - **Nothing changes on your Mac.** The same engine can now also run on a Linux server, for
   Nucleus Cloud, where Claude is paid with Nucleus credits instead of an Anthropic sign-in.

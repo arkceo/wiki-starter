@@ -1,0 +1,20 @@
+# An AWS build project: build cloud/Dockerfile from this release and push it to the service's
+# own registry, tagged with the release. The service names the release it runs; its
+# build project checks out that tag of the public repository and runs this file.
+#
+# Environment (set by the build project): REPOSITORY_URI, the registry to push to;
+# RELEASE, the tag being built (CODEBUILD_SOURCE_VERSION when unset).
+version: 0.2
+phases:
+  pre_build:
+    commands:
+      - RELEASE="${RELEASE:-$CODEBUILD_SOURCE_VERSION}"
+      - echo "building wiki-starter $RELEASE ($(cat .wiki-engine/VERSION)) at $CODEBUILD_RESOLVED_SOURCE_VERSION"
+      - aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "${REPOSITORY_URI%%/*}"
+  build:
+    commands:
+      - docker build -f cloud/Dockerfile --label "wiki-starter.release=$RELEASE" --label "wiki-starter.commit=$CODEBUILD_RESOLVED_SOURCE_VERSION" -t "$REPOSITORY_URI:$RELEASE" -t "$REPOSITORY_URI:latest" .
+  post_build:
+    commands:
+      - docker push "$REPOSITORY_URI:$RELEASE"
+      - docker push "$REPOSITORY_URI:latest"
