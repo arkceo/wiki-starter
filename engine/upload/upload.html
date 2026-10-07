@@ -577,6 +577,7 @@
   const BOOT = __WIKI_BOOT__
   let TOKEN = BOOT.token
   const SITE = BOOT.site || ""    // the wiki itself is another origin (another port)
+  const APP = BOOT.app || ""      // where this page's own requests go: "" here, a path behind a proxy (Nucleus Cloud)
   document.getElementById("back").href = SITE + "/"
   let maxBytes = 500 * 1048576
   try {
@@ -1149,6 +1150,11 @@
   }
   function costWords(e, amount, spent) {
     const so = spent != null && spent > 0 ? ` (${fmtUsd(spent)} so far)` : ""
+    if (e.billing === "credits") {   // Nucleus Cloud: 1 credit is 1 US cent
+      const cr = (v) => `${Math.max(1, Math.round(v * 100)).toLocaleString("en-US")} credits`
+      return [`About <b>${cr(amount)}</b>${spent != null && spent > 0 ? ` (${cr(spent)} so far)` : ""}`,
+        "Paid with your Nucleus credits, as each document is read."]
+    }
     if (e.billing === "api") return [`About <b>${fmtUsd(amount)}</b> in Claude API costs${so}`,
       "Billed to your Anthropic API key, as Claude reports each batch's cost."]
     if (e.billing === "plan") return [`About <b>${fmtUsd(amount)}</b> of Claude usage at API prices${so}`,
@@ -1199,7 +1205,7 @@
   function refreshToken() {
     if (!refreshing) refreshing = (async () => {
       try {
-        const r = await fetch("/upload", { cache: "no-store" })
+        const r = await fetch(APP + "/upload", { cache: "no-store" })
         const m = r.ok ? /const BOOT = (\{.*\})\s*\n/.exec(await r.text()) : null
         const boot = m ? JSON.parse(m[1]) : null
         if (boot && boot.token) {
@@ -1218,7 +1224,7 @@
   let es = null, lastId = ""
   function connect() {
     if (es) es.close()
-    const src = new EventSource("/api/events?token=" + encodeURIComponent(TOKEN) + (lastId ? "&since=" + encodeURIComponent(lastId) : ""))
+    const src = new EventSource(APP + "/api/events?token=" + encodeURIComponent(TOKEN) + (lastId ? "&since=" + encodeURIComponent(lastId) : ""))
     es = src
     src.onmessage = (m) => { if (m.lastEventId) lastId = m.lastEventId; try { onEvent(JSON.parse(m.data)) } catch (_) {} }
     src.addEventListener("now", (m) => { try { onNow(JSON.parse(m.data)) } catch (_) {} })
@@ -1234,7 +1240,7 @@
     polling = true
     clearTimeout(pollTimer)
     try {
-      const r = await fetch("/api/status?token=" + encodeURIComponent(TOKEN), { cache: "no-store" })
+      const r = await fetch(APP + "/api/status?token=" + encodeURIComponent(TOKEN), { cache: "no-store" })
       if (r.status === 403) onForbidden()
       if (r.ok) {
         const s = await r.json()
@@ -1328,7 +1334,7 @@
     const started = Date.now()
     const probe = async () => {
       let up = false
-      try { up = (await fetch("/upload", { cache: "no-store" })).ok } catch (_) {}
+      try { up = (await fetch(APP + "/upload", { cache: "no-store" })).ok } catch (_) {}
       if (up) { await refreshToken(); offline = false; lastOk = Date.now(); showConnection(); pump(); pollSoon(); render(); return }
       if (Date.now() - started > 30 * 60000) {   // give up: what is still queued is marked failed
         offline = false
@@ -1352,7 +1358,7 @@
   function send({ file, name, key, tries = 0, lost = 0 }) {
     uploading++
     const xhr = new XMLHttpRequest()
-    xhr.open("POST", "/api/upload?name=" + encodeURIComponent(name))
+    xhr.open("POST", APP + "/api/upload?name=" + encodeURIComponent(name))
     xhr.setRequestHeader("X-Wiki-Token", TOKEN)
     xhr.upload.onprogress = (ev) => {
       if (ev.lengthComputable) { const r = rows.get(key); if (r) { r.pct = Math.round((ev.loaded / ev.total) * 100); render() } }
@@ -1464,7 +1470,7 @@
   $("process").onclick = async () => {
     $("process").disabled = true
     try {
-      await fetch("/api/process", { method: "POST", headers: { "X-Wiki-Token": TOKEN } })
+      await fetch(APP + "/api/process", { method: "POST", headers: { "X-Wiki-Token": TOKEN } })
     } catch (_) {}
   }
   window.addEventListener("beforeunload", (e) => { if (uploading || queue.length || retrying) { e.preventDefault(); e.returnValue = "" } })
@@ -1476,10 +1482,10 @@
     if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body) }
     let data = {}
     try {
-      let r = await fetch(path, opt)
+      let r = await fetch(APP + path, opt)
       if (r.status === 403 && await refreshToken()) {   // the viewer restarted: once more, with its new token
         opt.headers["X-Wiki-Token"] = TOKEN
-        r = await fetch(path, opt)
+        r = await fetch(APP + path, opt)
       }
       if (r.status === 403) reloadForNewToken()
       try { data = await r.json() } catch (_) {}

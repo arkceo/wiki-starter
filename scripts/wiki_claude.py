@@ -19,7 +19,14 @@ picture or a scan it has to look at. Each call is `claude -p` with this pipeline
 system prompt and --json-schema, run from an empty folder outside the wiki (no project
 CLAUDE.md), with no settings files and no MCP servers, signed in the way the runner signed
 in (an API key or a Claude plan). Standard library only.
+
+On Nucleus Cloud ("engine": "credits" in wiki.config.json, with WIKI_CREDITS_URL and
+WIKI_CREDITS_TOKEN set) there is no claude command: each question goes instead to the
+credits service's /v1/step, as one message with no tools, the schema written into the
+system prompt and the answer read back as JSON. A picture the question names inside
+read_dirs goes with it as an image; nothing else on the computer is sent.
 """
+import base64
 import json
 import os
 import re
@@ -29,6 +36,8 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 
 # A failure in these words means Claude itself cannot run now (sign-in, billing, the
 # plan's usage limit, a Mac that is offline, Anthropic's service failing), not that one
@@ -121,6 +130,59 @@ def answer_of(stdout):
     return None
 
 
+# ---------------------------------------------------------------- credits ----------
+CREDITS_KIND = "wiki"           # the step's kind on the credits service (its price)
+SCHEMA_NOTE = ("\n\n---\nYou have no tools. A picture named in the question, if any, is attached to it. "
+               "Answer with one JSON object and nothing else, matching this JSON schema:\n")
+PICTURE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+                 ".webp": "image/webp"}
+PICTURE_MAX_BYTES = 5_000_000   # the service takes about 7 MB of base64 per picture
+
+
+def credits_service():
+    """(url, token) when this wiki reads through a credits service (Nucleus Cloud), else None."""
+    url = (os.environ.get("WIKI_CREDITS_URL") or "").strip().rstrip("/")
+    token = (os.environ.get("WIKI_CREDITS_TOKEN") or "").strip()
+    return (url, token) if url and token else None
+
+
+def pictures_named(user, read_dirs):
+    """The pictures in read_dirs whose path the question names: what Claude would have
+    opened with Read. At most two, each small enough for the service."""
+    found = []
+    for d in read_dirs:
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(os.path.abspath(d), name)
+            mime = PICTURE_TYPES.get(os.path.splitext(name)[1].lower())
+            if mime and path in user and os.path.isfile(path) and os.path.getsize(path) <= PICTURE_MAX_BYTES:
+                found.append((path, mime))
+    return found[:2]
+
+
+def json_in(text):
+    """The JSON object in a reply: the whole text, a fenced block, or from its first { to
+    its last }."""
+    text = (text or "").strip()
+    m = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
+    for cand in (text, m.group(1) if m else "", text[text.find("{"): text.rfind("}") + 1]):
+        try:
+            v = json.loads(cand)
+        except ValueError:
+            continue
+        if isinstance(v, dict):
+            return v
+    return None
+
+
+def credits_model(model):
+    """The credits service's short model name for the one asked for."""
+    return "haiku" if "haiku" in (model or "").lower() else "sonnet"
+
+
 class Claude:
     """`claude -p` as a function: a system prompt, a question and a JSON schema in, the
     answer out. Thread-safe; keeps the calls, cost and time for the run's summary, and
@@ -139,6 +201,7 @@ class Claude:
         self.kinds = {}
         self.no_effort = False  # this claude does not know --effort (an older CLI)
         self.deadline = None   # local_engine.Model's interface: a per-call limit is used instead
+        self.credits = credits_service()
 
     def ask(self, sysmsg, user, schema, max_tokens=None, read_dirs=(), kind="other", model=None, effort=None):
         """kind names the call in the run's summary; model and effort, when given, are this
@@ -158,6 +221,8 @@ class Claude:
             raise
 
     def _ask(self, sysmsg, user, schema, read_dirs, kind, model, effort):
+        if self.credits:
+            return self._ask_credits(sysmsg, user, schema, read_dirs, kind, model)
         cmd = [self.bin, "-p", "--output-format", "json", "--no-session-persistence",
                "--setting-sources", "", "--strict-mcp-config",
                "--system-prompt", sysmsg, "--json-schema", json.dumps(loose(schema)),
@@ -220,6 +285,55 @@ class Claude:
                 answer = None
         if not isinstance(answer, dict):
             raise RuntimeError("Claude's answer was not in the asked form")
+        return shaped(answer, schema)
+
+    def _ask_credits(self, sysmsg, user, schema, read_dirs, kind, model):
+        """One question on the credits service (Nucleus Cloud). Out of credits, signed out,
+        or the service out of reach stops the run (ClaudeUnavailable, no try counted); a
+        refusal of this question (HTTP 400) or an answer not in the asked form counts
+        against the document, as with claude -p."""
+        url, token = self.credits
+        content = [{"type": "text", "text": user}]
+        for path, mime in pictures_named(user, read_dirs):
+            with open(path, "rb") as fh:
+                content.append({"type": "image", "source": {"type": "base64", "media_type": mime,
+                                                             "data": base64.b64encode(fh.read()).decode("ascii")}})
+        body = {"kind": CREDITS_KIND, "model": credits_model(model),
+                "system": sysmsg + SCHEMA_NOTE + json.dumps(loose(schema)),
+                "messages": [{"role": "user", "content": content}]}
+        req = urllib.request.Request(url + "/v1/step", data=json.dumps(body).encode("utf-8"), method="POST",
+                                     headers={"Content-Type": "application/json", "User-Agent": "wiki-starter",
+                                              "Authorization": "Bearer " + token})
+        t0 = time.time()
+        with self.lock:
+            if self.stopped:
+                raise ClaudeUnavailable("the run is stopping")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                ans = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            self._count(time.time() - t0, None, failed=True, kind=kind)
+            try:
+                said = str(json.loads(e.read().decode("utf-8", "replace")).get("error") or "")[:300]
+            except (ValueError, AttributeError, OSError):
+                said = ""
+            if e.code == 402:
+                raise ClaudeUnavailable("credit balance is too low: top up Nucleus credits")
+            if e.code in (401, 403):
+                raise ClaudeUnavailable("not signed in to Nucleus credits")
+            if e.code >= 500 or e.code in (408, 429):
+                raise ClaudeUnavailable(f"the credits service failed (HTTP {e.code}) {said}".strip())
+            raise RuntimeError(f"Claude: the credits service refused the question (HTTP {e.code}): {said}")
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            self._count(time.time() - t0, None, failed=True, kind=kind)
+            raise ClaudeUnavailable(f"can't reach the credits service: {getattr(e, 'reason', e)}")
+        charged = ans.get("charged") if isinstance(ans, dict) else None
+        cost = charged * 0.01 if isinstance(charged, (int, float)) and not isinstance(charged, bool) else None
+        answer = json_in(ans.get("text") if isinstance(ans, dict) else "")
+        if not isinstance(answer, dict):
+            self._count(time.time() - t0, cost, failed=True, kind=kind)
+            raise RuntimeError("Claude's answer was not in the asked form")
+        self._count(time.time() - t0, cost, kind=kind)
         return shaped(answer, schema)
 
     def spent(self):

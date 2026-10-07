@@ -520,6 +520,11 @@ run_claude() { # label prompt-file max-turns [batch-file]
     log "claude $label: refused, this wiki reads with the model on this Mac"
     return 1
   fi
+  # On Nucleus Cloud there is no Claude Code session: only one question at a time.
+  if [ "$ENGINE" = credits ]; then
+    log "claude $label: refused, this wiki reads through Nucleus credits"
+    return 1
+  fi
   budget=${SPEND_CAP:-5}
   if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
     log "claude not found on PATH"
@@ -580,6 +585,14 @@ claude_problem() { # reason
   local why low
   why=$(printf '%s' "${1#Claude could not run: }" | tr '\n\t' '  ' | cut -c1-160)
   low=$(printf '%s' "$why" | tr 'A-Z' 'a-z')
+  if [ "${ENGINE:-}" = credits ]; then   # Nucleus Cloud: Claude is paid with Nucleus credits
+    case "$low" in
+      *"credit balance"*) echo "The wiki could not read: your Nucleus credits have run out. Top up in Nucleus (Settings, Nucleus credits). Nothing is lost: the documents wait." ;;
+      *"not signed in"*) echo "The wiki could not read: Nucleus is signed out of Nucleus credits. Sign in again in Nucleus. Nothing is lost: the documents wait." ;;
+      *) echo "The wiki could not read${why:+ ($why)}. Nothing is lost: the documents wait, and the next run tries again." ;;
+    esac
+    return 0
+  fi
   case "$low" in
     *"failed to authenticate"*|*"invalid api key"*|*"api key is invalid"*|*"not logged in"*|*"/login"*|*"oauth token"*|*unauthori*|*authentication*)
       echo "Claude could not run: it is not signed in. Check your Anthropic sign-in (run the installer again), then press Process now on the Upload page." ;;
@@ -948,13 +961,13 @@ fi
 nowp prepare detail="getting the documents ready"
 route_misfiled
 ENGINE=$(config_value engine claude)
-[ "$ENGINE" = local ] || load_credentials
+case "$ENGINE" in local|credits) ;; *) load_credentials ;; esac
 # How Claude reads: "fast" (the default), one Claude call per document, many at once,
 # with the engine checking every answer and writing the pages (scripts/local_engine.py
 # --reader claude); or "classic", a Claude Code session per batch that writes the pages
-# itself.
+# itself. Through Nucleus credits ("engine": "credits", Nucleus Cloud) it is always fast.
 PIPELINE=classic
-if [ "$ENGINE" != local ] && [ "$(config_value pipeline fast)" != classic ]; then
+if [ "$ENGINE" = credits ] || { [ "$ENGINE" != local ] && [ "$(config_value pipeline fast)" != classic ]; }; then
   PIPELINE=fast
   export CLAUDE_BIN
 fi
@@ -1000,6 +1013,7 @@ log "$RUN_ID: $N_DOCS document(s), $N_PACKETS packet(s) waiting${WAITING_ALL:+ (
 # How Claude is paid for, so the Upload page can say what its cost estimate means.
 AUTH=login
 if [ "$ENGINE" = local ]; then AUTH=local
+elif [ "$ENGINE" = credits ]; then AUTH=credits
 elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then AUTH=api
 elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then AUTH=plan; fi
 ev run-start docs:="$N_DOCS" packets:="$N_PACKETS" auth="$AUTH"
@@ -1137,7 +1151,7 @@ read_batch() { # batch k: runs in the background; leaves its outcome in the lane
     run_local --docs "$BATCH_DIR/$b" --tried "$LANE_DIR/$b.tried" --capped "$LANE_DIR/$b.capped" \
       --inflight "$LANE_DIR/$b.inflight" --why "$WHY_FILE"; rc=$?
   elif [ "$PIPELINE" = fast ]; then
-    if command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
+    if [ "$ENGINE" = credits ] || command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
       # Documents it was reading when it died in an earlier run go first, one at a time.
       run_local --docs "$BATCH_DIR/$b" --reader claude --tried "$LANE_DIR/$b.tried" \
         --capped "$LANE_DIR/$b.capped" --inflight "$LANE_DIR/$b.inflight" --alone "$SUSPECTS" \
@@ -1241,13 +1255,15 @@ done
 [ -n "$BUILDER" ] && wait_at_most "$BUILDER" "$BUILD_TIMEOUT_SECONDS"; BUILDER=""
 unset WIKI_BATCH
 
-# Update Packets, after the documents.
-if [ "$ENGINE" = local ]; then
-  MAX_INGEST_ROUNDS=0   # the model on this Mac applies them in one call
+# Update Packets, after the documents. The model on this Mac, and Claude through Nucleus
+# credits (no Claude Code session there), apply them with the engine, in one go.
+if [ "$ENGINE" = local ] || [ "$ENGINE" = credits ]; then
+  MAX_INGEST_ROUNDS=0
   LOCAL_PACKETS=$(ready_packets)
+  PACKET_READER=""; [ "$ENGINE" = credits ] && PACKET_READER="--reader claude"
   if [ "$CLAUDE_OK" = 1 ] && [ -n "$LOCAL_PACKETS" ]; then
     printf '%s\n' "$LOCAL_PACKETS" > "$LANE_DIR/packets.list"
-    run_local --packets --packet-list "$LANE_DIR/packets.list" --inflight "$LANE_DIR/packets.inflight" \
+    run_local --packets $PACKET_READER --packet-list "$LANE_DIR/packets.list" --inflight "$LANE_DIR/packets.inflight" \
       --why "$LANE_DIR/packets.why"; rc=$?
     case "$rc" in
       0) printf '%s\n' "$LOCAL_PACKETS" >> "$TRIED" ;;

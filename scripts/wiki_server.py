@@ -116,7 +116,7 @@ LIVE_SCRIPT = (
     "sans-serif;padding:10px 16px;border-radius:999px;border:0;background:#284b63;color:#fff;"
     "box-shadow:0 2px 10px rgba(0,0,0,.25);cursor:pointer\";document.body.append(b)}"
     "b.textContent=\"The wiki was updated\"+(n>0?\" \\u00b7 \"+n+\" new page\"+(n===1?\"\":\"s\"):\"\")"
-    "+\" \\u00b7 Show\"}async function check(){try{const r=await fetch(\"/.wiki/build\","
+    "+\" \\u00b7 Show\"}async function check(){try{const r=await fetch(\"@SITE_BASE@/.wiki/build\","
     "{cache:\"no-store\"});if(!r.ok)return;const s=await r.json();if(first===null){first=s.stamp;"
     "pages=s.pages;return}if(s.stamp===first)return;const quiet=Date.now()-touched>20000&&"
     "scrollY<40&&!document.querySelector(\"input:focus,textarea:focus,[contenteditable]:focus\");"
@@ -132,6 +132,11 @@ QUEUES = {"intake": "raw/_intake", "inbox": "raw/inbox"}
 PACKET_RE = re.compile(rb"^## \[[0-9]{4}-[0-9]{2}-[0-9]{2}\] *update *\|", re.M)
 PARTIAL_EXT = (".download", ".crdownload", ".part", ".partial", ".tmp")
 TOKEN = secrets.token_urlsafe(24)
+# Behind a proxy that serves the wiki under paths of its own site (Nucleus Cloud), where the
+# site and the Upload app are, as the browser sees them: e.g. "/wiki" and "/wiki/_app".
+# Empty on a Mac, where each is its own origin on 127.0.0.1.
+SITE_BASE = (os.environ.get("WIKI_SITE_BASE") or "").rstrip("/")
+APP_BASE = (os.environ.get("WIKI_APP_BASE") or "").rstrip("/")
 HISTORY_LINES = 800
 HEARTBEAT_SECONDS = 15
 
@@ -480,7 +485,8 @@ def build_info():
 
 def with_live_script(html):
     i = html.rfind(b"</body>")
-    return html[:i] + LIVE_SCRIPT.encode() + html[i:] if i >= 0 else html + LIVE_SCRIPT.encode()
+    live = LIVE_SCRIPT.replace("@SITE_BASE@", SITE_BASE).encode()
+    return html[:i] + live + html[i:] if i >= 0 else html + live
 
 
 # ------------------------------------------------------------------- settings ------
@@ -978,7 +984,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._not_found(head_only)
         cfg = load_config()
         boot = json.dumps({"token": TOKEN, "title": cfg.get("title") or "Wiki",
-                           "site": self._origin_for(self.server.site_port)})
+                           "site": SITE_BASE or self._origin_for(self.server.site_port), "app": APP_BASE})
         html = html.replace("__WIKI_BOOT__", boot.replace("</", "<\\/"))
         self._send_bytes(200, "text/html; charset=utf-8", html.encode("utf-8"), head_only,
                          {"X-Frame-Options": "DENY",

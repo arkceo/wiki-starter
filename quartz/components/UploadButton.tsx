@@ -13,18 +13,23 @@ import { classNames } from "../util/lang"
  * can. Plain links, so they work without any script on the page, and they opt out of
  * Quartz's in-page navigation (data-router-ignore): /upload is not a Quartz page, so
  * swapping it in would leave its own script unrun.
+ *
+ * WIKI_SITE_BASE, set at build time behind a proxy that serves the wiki under a path of its
+ * own site (Nucleus Cloud: "/wiki"), goes in front of both links; on a Mac it is empty.
  */
+const base = (process.env.WIKI_SITE_BASE || "").replace(/\/+$/, "")
+
 const UploadButton: QuartzComponent = ({ displayClass }: QuartzComponentProps) => {
   return (
     <div class={classNames(displayClass, "wiki-links")}>
-      <a class="ask-link" href="/upload#ask" data-router-ignore title="Ask a question about the business">
+      <a class="ask-link" href={`${base}/upload#ask`} data-router-ignore title="Ask a question about the business">
         <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
           stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z" />
         </svg>
         <span>Ask</span>
       </a>
-      <a class="upload-link" href="/upload" data-router-ignore title="Add documents and see what the wiki is doing">
+      <a class="upload-link" href={`${base}/upload`} data-router-ignore title="Add documents and see what the wiki is doing">
         <svg aria-hidden="true" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
           stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 16V4M6 10l6-6 6 6M4 20h16" />
