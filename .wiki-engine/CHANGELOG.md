@@ -2,6 +2,16 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## A cloud wiki runs the same engine as your Mac
+- **Nothing changes on your Mac.**
+- **In the cloud, the wiki's own Upload page.** A cloud service (oeru) can now run this
+  engine for a person while they use it (`cloud/session.py`): the same Upload page,
+  Review, Ask, Actions and Settings as a Mac, started when they open it and stopped by
+  itself once nothing has happened for 15 minutes. Only the colours differ.
+- **Uploads can go straight to the wiki's storage.** On such a server, the Upload page
+  sends each file straight to storage and the wiki then takes it in, so a proxy's size
+  cap on requests never limits a file.
+
 ## The cloud version's code is public too
 - **Nothing changes on your Mac.** Your wiki gains a small `cloud/` folder it never uses.
 - **Everything oeru runs on your documents is now here, in the open.** The job that reads

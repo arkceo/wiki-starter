@@ -580,6 +580,7 @@
   const APP = BOOT.app || ""      // where this page's own requests go: "" here, a path behind a proxy (Nucleus Cloud)
   document.getElementById("back").href = SITE + "/"
   let maxBytes = 500 * 1048576
+  let direct = false              // a server with an upload helper: files go straight to its storage
   try {
     const saved = localStorage.getItem("theme")
     if (saved === "dark" || saved === "light") document.documentElement.setAttribute("data-theme", saved)
@@ -1288,6 +1289,7 @@
         }
         $("limit").textContent = `Up to ${s.maxUploadMb} MB per file.`
         maxBytes = s.maxUploadMb * 1048576
+        direct = !!s.direct
         for (const p of [...s.queue.intake, ...s.queue.inbox]) row(p)  // also files added outside this page
         if (s.now) onNow(s.now)
         render()
@@ -1355,7 +1357,49 @@
     return lost
   }
   setInterval(showConnection, 5000)
+  // On a server whose proxy caps request sizes (the wiki in the cloud), a file goes straight
+  // to the wiki's own storage, and the wiki then takes it into the queue as an upload.
+  async function sendDirect({ file, name, key }) {
+    uploading++
+    const fail = (note) => {
+      const r = rows.get(key)
+      if (r) { finish(r, "failed"); r.note = note; logLine(null, `${r.name}: ${r.note}`, "bad") }
+    }
+    const call = async (path) => {
+      const res = await fetch(APP + path, { method: "POST", headers: { "X-Wiki-Token": TOKEN } })
+      return res.json().catch(() => ({}))
+    }
+    try {
+      const a = await call("/api/upload/direct?name=" + encodeURIComponent(name) + "&size=" + file.size)
+      if (a.skipped) { const r = rows.get(key); if (r) { finish(r, "skipped"); r.note = "Skipped: " + a.skipped }; return }
+      if (!a.ok) { fail(a.error || "The upload could not be started"); return }
+      await new Promise((resolve, reject) => {
+        const x = new XMLHttpRequest()
+        x.open("PUT", a.url)
+        for (const [h, v] of Object.entries(a.headers || {})) x.setRequestHeader(h, v)
+        x.upload.onprogress = (ev) => {
+          if (ev.lengthComputable) { const r = rows.get(key); if (r) { r.pct = Math.round((ev.loaded / ev.total) * 100); render() } }
+        }
+        x.onloadend = () => (x.status >= 200 && x.status < 300 ? resolve() : reject(new Error("Error " + x.status)))
+        x.send(file)
+      })
+      const res = await call("/api/upload/direct/done?name=" + encodeURIComponent(name) + "&key=" + encodeURIComponent(a.key))
+      if (res.skipped) { const r = rows.get(key); if (r) { finish(r, "skipped"); r.note = "Skipped: " + res.skipped }; return }
+      if (!res.ok) { fail(res.error || "Could not save the file"); return }
+      const merged = rekey(key, res.file)
+      if (merged) { setState(merged, "queued"); merged.note = "" }
+      pollSoon()
+      if (res.duplicate && merged && merged.key === res.file) merged.note = "The same file was already queued"
+    } catch (_) {
+      fail("Connection lost")
+    } finally {
+      uploading--
+      render()
+      pump()
+    }
+  }
   function send({ file, name, key, tries = 0, lost = 0 }) {
+    if (direct) { sendDirect({ file, name, key }); return }
     uploading++
     const xhr = new XMLHttpRequest()
     xhr.open("POST", APP + "/api/upload?name=" + encodeURIComponent(name))

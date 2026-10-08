@@ -1,0 +1,7 @@
+# Earlier versions of the cloud starter pages (cloud/seeds/), as starter/seed-history.txt
+# keeps the Mac ones: `wiki_cloud.py cloud-image` adds these to the image's seed history,
+# so a cloud page nobody edited is brought up to date and one somebody edited never is.
+# When you change a cloud starter page, add the hash of the version being replaced here.
+dced5fa2eb872060e72fd15b843acabbad13ef73da0e0c01e55d92ca5f71fec5  wiki/index.md
+489414e48f5065e3a12a73a1f649183e8ba12284139c0f3947c02456e5bd5010  wiki/how-it-runs/how-this-wiki-works.md
+1a525a558c66e5eb18deb843f3156f57f0eac9ec108f9203afcb48196286c308  wiki/how-it-runs/how-this-wiki-works.md

@@ -9,7 +9,7 @@
 FROM public.ecr.aws/docker/library/node:22-bookworm-slim
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-venv git ca-certificates \
+ && apt-get install -y --no-install-recommends python3 python3-venv git ca-certificates openssl \
  && rm -rf /var/lib/apt/lists/*
 
 COPY . /opt/engine
@@ -28,5 +28,7 @@ RUN python3 /opt/engine/scripts/wiki_cloud.py cloud-image --engine /opt/engine
 # job.py's only dependency: the AWS SDK, in a venv of its own.
 RUN python3 -m venv /opt/job-venv && /opt/job-venv/bin/pip install --no-cache-dir 'boto3>=1.34,<2'
 
+# A session (cloud/session.py, started with that command instead) opens its one door here.
+EXPOSE 8443
 ENV WIKI_DEPS=/opt/wiki-deps WIKI_ENGINE_DIR=/opt/engine PYTHONDONTWRITEBYTECODE=1
 CMD ["/opt/job-venv/bin/python", "/opt/engine/cloud/job.py"]

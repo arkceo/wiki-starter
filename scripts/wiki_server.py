@@ -14,6 +14,11 @@ Run by a LaunchAgent with KeepAlive. Two origins, on two ports of 127.0.0.1:
   the Upload app (uploadPort, default port + 1)
     /upload            the Upload & Logs page (engine/upload/upload.html)
     /api/upload        POST one file into the queue (raw/_intake/, or raw/inbox/ for a packet)
+    /api/upload/direct POST, on a server with an upload helper (WIKI_UPLOAD_HELPER, set by the
+                       cloud session in cloud/session.py): an address the browser sends one
+                       file to straight, in object storage, instead of through a proxy that
+                       caps request sizes; POST /api/upload/direct/done then brings it into
+                       the queue exactly as /api/upload would
     /api/events        the activity log as a live stream (server-sent events), and what
                        is happening right now as `now` events
     /api/status        what is queued, running (and for how long nothing has moved) and
@@ -76,6 +81,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import urllib.request
 
 WIKI_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(WIKI_DIR, "scripts"))
@@ -138,6 +144,9 @@ TOKEN = secrets.token_urlsafe(24)
 SITE_BASE = (os.environ.get("WIKI_SITE_BASE") or "").rstrip("/")
 APP_BASE = (os.environ.get("WIKI_APP_BASE") or "").rstrip("/")
 HISTORY_LINES = 800
+# A server deployment (cloud/session.py) runs a helper on 127.0.0.1 that hands out storage
+# addresses for uploads and brings the files back down; empty on a Mac.
+UPLOAD_HELPER = (os.environ.get("WIKI_UPLOAD_HELPER") or "").rstrip("/")
 HEARTBEAT_SECONDS = 15
 
 
@@ -243,6 +252,15 @@ def place_upload(tmp, name):
         os.unlink(tmp)
         return queue, dest, False
     raise OSError("too many files with this name")
+
+
+def upload_helper(path, body):
+    """One call to the upload helper on 127.0.0.1 (never through a proxy)."""
+    req = urllib.request.Request(UPLOAD_HELPER + path, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=900) as r:
+        return json.loads(r.read() or b"{}")
 
 
 # --------------------------------------------------------------------- status ------
@@ -450,6 +468,7 @@ def status():
         "engine": cfg.get("engine") or "claude",
         "version": version,
         "maxUploadMb": round(max_upload_bytes() / 1024 / 1024),
+        "direct": bool(UPLOAD_HELPER),
         "queue": queue,
         "needsReview": list_queue("raw/_needs-review"),
         "review": {"open": wiki_review.count_open(), "rev": wiki_review.revision()},
@@ -1118,6 +1137,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._forbid(why="Forbidden: open the Upload page from the wiki")
         if rel == "api/upload":
             return self._upload(query)
+        if rel == "api/upload/direct" and UPLOAD_HELPER:
+            self._drain_small()
+            return self._upload_direct(query)
+        if rel == "api/upload/direct/done" and UPLOAD_HELPER:
+            self._drain_small()
+            return self._upload_direct_done(query)
         if rel == "api/process":
             wiki_events.emit("process-requested")
             return self._send_json(200, {"ok": True, "runner": start_runner()})
@@ -1277,6 +1302,49 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._send_json(500, {"ok": False, "error": "could not save the file"})
         path = os.path.relpath(dest, WIKI_DIR).replace(os.sep, "/")
         wiki_events.emit("upload", file=path, name=name, queue=queue, bytes=length,
+                         duplicate=True if duplicate else None)
+        return self._send_json(200, {"ok": True, "file": path, "queue": queue,
+                                     "duplicate": duplicate})
+
+    def _upload_direct(self, query):
+        name, why = clean_upload_name((query.get("name") or [""])[0])
+        if name is None:
+            return self._send_json(200, {"ok": False, "skipped": why})
+        try:
+            size = int((query.get("size") or [""])[0])
+        except ValueError:
+            return self._send_json(400, {"ok": False, "error": "the upload had no size"})
+        limit = max_upload_bytes()
+        if size > limit:
+            return self._send_json(413, {"ok": False, "error":
+                                         f"larger than the {round(limit / 1024 / 1024)} MB limit"})
+        try:
+            got = upload_helper("/presign", {"size": size})
+        except (OSError, ValueError):
+            return self._send_json(502, {"ok": False, "error": "the upload could not be started"})
+        return self._send_json(200, {"ok": True, "url": got["url"], "headers": got.get("headers") or {},
+                                     "key": got["key"]})
+
+    def _upload_direct_done(self, query):
+        name, why = clean_upload_name((query.get("name") or [""])[0])
+        if name is None:
+            return self._send_json(200, {"ok": False, "skipped": why})
+        key = (query.get("key") or [""])[0]
+        os.makedirs(UPLOAD_TMP, exist_ok=True)
+        tmp = os.path.join(UPLOAD_TMP, f".upload-{secrets.token_hex(8)}.part")
+        try:
+            got = upload_helper("/fetch", {"key": key, "dest": tmp, "limit": max_upload_bytes()})
+            if not got.get("ok"):
+                raise OSError(got.get("error") or "not fetched")
+            queue, dest, duplicate = place_upload(tmp, name)
+        except (OSError, ValueError):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            return self._send_json(500, {"ok": False, "error": "could not save the file"})
+        path = os.path.relpath(dest, WIKI_DIR).replace(os.sep, "/")
+        wiki_events.emit("upload", file=path, name=name, queue=queue, bytes=got.get("bytes"),
                          duplicate=True if duplicate else None)
         return self._send_json(200, {"ok": True, "file": path, "queue": queue,
                                      "duplicate": duplicate})
