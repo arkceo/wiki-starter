@@ -4,7 +4,7 @@ type: concept
 tags: [how-it-runs, wiki]
 sources: []
 status: active
-updated: 2026-10-07
+updated: 2026-10-08
 ---
 
 This wiki is kept for you by oeru in Malaysia, in a private place of its own: its files
@@ -15,17 +15,19 @@ your oeru credits.
 
 ## Adding documents and notes
 
-Click **Upload** at the top right of any page. On the page it opens, drop files onto the
-box or click it to choose them, up to 20 at a time and 100 MB each. They go straight into
-the wiki's own storage, into a queue:
+Click **Upload** at the top right of any page. It opens the wiki's own Upload page, the
+same one a wiki on a Mac has, with the **Review**, **Ask**, **Actions** and **Settings**
+tabs beside it. The first time after a rest it takes up to a minute to open, while the
+machine that runs your wiki starts (see below). Drop files onto the page or click to
+choose them. They go straight into the wiki's own storage, into a queue:
 
 | What you upload | Queue | What happens |
 |---|---|---|
 | Documents: PDF, Word, Excel, PowerPoint, photos, scans | `raw/_intake/` | Converted to text (with OCR for scans and photos), summarised into the right pages, then filed under `raw/<project>/` |
 | Update Packets (`.md`) from a Claude conversation | `raw/inbox/` | Applied to the affected pages, then moved to `archive/inbox/` |
 
-While they upload and while they are read, a live line shows what is happening: the
-step, how many files are still to read, and how long it has taken so far.
+The Upload page shows each file going up, what is being read and the activity log as it
+happens, as on a Mac.
 
 ## The menu
 
@@ -52,14 +54,13 @@ Anyone who can sign in to your oeru account can see them.
 
 ## How the reading runs
 
-Nothing runs while you are not using the wiki. When files arrive, a machine is made for
-that one job: it takes the wiki from storage, reads what waits in the queues, rebuilds
-the site, puts everything back and is deleted. Only one job runs for your wiki at a time;
-files that arrive meanwhile are read straight after. A job stops taking on new documents
-after 40 minutes, and whatever is left waits for the next one.
-
-Ask, the Review tab, Actions and Settings belong to the wiki's own Upload page on a Mac.
-On oeru they are being brought to the Upload page, one at a time.
+Reading the wiki's pages needs no machine: they come straight from storage. When you open
+the Upload page, a machine is started for you alone. It takes the wiki from storage and
+runs the same engine as a Mac: the Upload page, the reading, Review, Ask, Actions and
+Settings. It saves the wiki back to storage every few minutes while things change, so
+the pages stay current. Once nothing has been read and nobody has used the Upload page
+for 15 minutes, it saves everything and is deleted by itself; nobody has to stop it.
+Reading still in progress keeps it going until it is done.
 
 ## What Claude may do when nobody is watching
 

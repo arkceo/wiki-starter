@@ -137,8 +137,9 @@ def cloud_image(engine, seeds):
     """At image build (cloud/Dockerfile): lay the cloud starter pages (cloud/seeds/) over
     the Mac ones in this engine, and keep its bookkeeping true, so setup and the runner
     carry them like any engine file:
-      · engine/seed-history.txt gets their hashes, so a page nobody edited is replaced and
-        one somebody edited never is;
+      · engine/seed-history.txt gets their hashes, and those of their earlier versions
+        (cloud/seed-history.txt), so a page nobody edited is replaced and one somebody
+        edited never is;
       · .wiki-engine/files.txt gets their hashes, so setup brings them into a wiki that
         already exists, as an engine update;
       · .wiki-engine/VERSION gets "+cloud", so setup sees an engine it has not had yet."""
@@ -160,7 +161,12 @@ def cloud_image(engine, seeds):
             laid.append(rel)
     if not laid:
         raise SystemExit("cloud-image: no cloud starter pages")
+    earlier = os.path.join(os.path.dirname(os.path.abspath(seeds)), "seed-history.txt")
     with open(os.path.join(engine, "engine", "seed-history.txt"), "a", encoding="utf-8") as hist:
+        if os.path.isfile(earlier):  # the cloud pages' own earlier versions
+            for line in open(earlier, encoding="utf-8"):
+                if line.strip() and not line.startswith("#"):
+                    hist.write(line if line.endswith("\n") else line + "\n")
         for rel in sorted(laid):
             hist.write(f"{sha(os.path.join(engine, rel))}  {rel[len('engine/seeds/'):]}\n")
     files_path = os.path.join(engine, ".wiki-engine", "files.txt")

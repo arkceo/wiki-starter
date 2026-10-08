@@ -63,8 +63,15 @@ DEADLINE = STARTED + max(5, int(job_env("MINUTES", "50") or "50") - 10) * 60
 # What is never stored: the image's dependencies, the build and its caches, and the history (kept as one archive).
 SKIP = {".git", "node_modules", ".venv", "public", "cache", ".quartz-cache"}
 
-s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION") or "ap-southeast-5",
-                  config=Config(retries={"max_attempts": 8, "mode": "adaptive"}))
+def client():
+    """S3 at the region's own address: an opt-in region such as Malaysia is not served by the
+    global one, and an upload address the browser is given must name the region's."""
+    region = os.environ.get("AWS_REGION") or "ap-southeast-5"
+    return boto3.client("s3", region_name=region, endpoint_url=f"https://s3.{region}.amazonaws.com",
+                        config=Config(retries={"max_attempts": 8, "mode": "adaptive"}, s3={"addressing_style": "virtual"}))
+
+
+s3 = client()
 PUT = {"ServerSideEncryption": "aws:kms", "SSEKMSKeyId": KMS}
 
 
