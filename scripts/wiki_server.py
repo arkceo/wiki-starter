@@ -969,6 +969,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         host = (self.headers.get("Host") or "127.0.0.1").rsplit(":", 1)[0].lower()
         return f"http://{host if host in ('127.0.0.1', 'localhost') else '127.0.0.1'}:{port}"
 
+    def _where(self, base, port):
+        """Where the site or the Upload app is, as the browser sees it: under its path behind a
+        proxy (a cloud wiki: WIKI_SITE_BASE, WIKI_APP_BASE), else its own port on this machine."""
+        return base if base else self._origin_for(port)
+
     def _redirect(self, url, head_only):
         self.send_response(302)
         self.send_header("Location", url)
@@ -1043,14 +1048,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self._stream_events(query)
                 return self._send_bytes(404, "text/plain; charset=utf-8", b"Not found\n", head_only)
             # Anything else belongs to the site.
-            return self._redirect(self._origin_for(self.server.site_port) + self.path, head_only)
+            return self._redirect(self._where(SITE_BASE, self.server.site_port) + self.path, head_only)
         if rel in ("upload", "upload/"):
             if not self.server.app_running:
                 return self._send_bytes(503, "text/plain; charset=utf-8",
                                         f"The Upload page could not start: port {self.server.app_port} is in "
                                         "use by another program. Set \"uploadPort\" in wiki.config.json to a "
                                         "free port and restart the Mac.\n".encode(), head_only)
-            return self._redirect(self._origin_for(self.server.app_port) + "/upload", head_only)
+            return self._redirect(self._where(APP_BASE, self.server.app_port) + "/upload", head_only)
         if rel == ".wiki/build":
             return self._send_json(200, build_info())
         top = rel.split("/", 1)[0]
