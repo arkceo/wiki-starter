@@ -472,6 +472,8 @@ def status():
         # The engine's times carry no zone; this is the zone they are in ("+0800"), so a
         # browser elsewhere (a cloud wiki on a server in UTC) times its steps right.
         "tz": time.strftime("%z"),
+        # The credits service's name as its owners know it (wiki_claude's, WIKI_CREDITS_NAME).
+        "creditsName": (os.environ.get("WIKI_CREDITS_NAME") or "").strip()[:40] or "Nucleus",
         "queue": queue,
         "needsReview": list_queue("raw/_needs-review"),
         "review": {"open": wiki_review.count_open(), "rev": wiki_review.revision()},

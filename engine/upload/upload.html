@@ -577,7 +577,7 @@
   const BOOT = __WIKI_BOOT__
   let TOKEN = BOOT.token
   const SITE = BOOT.site || ""    // the wiki itself is another origin (another port)
-  const APP = BOOT.app || ""      // where this page's own requests go: "" here, a path behind a proxy (Nucleus Cloud)
+  const APP = BOOT.app || ""      // where this page's own requests go: "" here, a path behind a proxy (a cloud wiki)
   document.getElementById("back").href = SITE + "/"
   let maxBytes = 500 * 1048576
   let direct = false              // a server with an upload helper: files go straight to its storage
@@ -673,6 +673,7 @@
   // The engine writes its times without a zone, in the server's own (status "tz", "+0800"):
   // read them in that zone, not the browser's, or a server in another zone shifts every timer.
   let serverTz = ""
+  let creditsName = "Nucleus"     // the credits service's own name (status "creditsName")
   const zoned = (t) => serverTz && /^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d)?$/.test(t)
     ? t.replace(" ", "T") + serverTz.slice(0, 3) + ":" + serverTz.slice(3) : t
   const when = (t) => { const ms = t ? Date.parse(zoned(t)) : NaN; return isNaN(ms) ? Date.now() : ms }
@@ -1168,10 +1169,10 @@
   }
   function costWords(e, amount, spent) {
     const so = spent != null && spent > 0 ? ` (${fmtUsd(spent)} so far)` : ""
-    if (e.billing === "credits") {   // Nucleus Cloud: 1 credit is 1 US cent
+    if (e.billing === "credits") {   // a credits service: 1 credit is 1 US cent
       const cr = (v) => `${Math.max(1, Math.round(v * 100)).toLocaleString("en-US")} credits`
       return [`About <b>${cr(amount)}</b>${spent != null && spent > 0 ? ` (${cr(spent)} so far)` : ""}`,
-        "Paid with your Nucleus credits, as each document is read."]
+        `Paid with your ${creditsName.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c])} credits, as each document is read.`]
     }
     if (e.billing === "api") return [`About <b>${fmtUsd(amount)}</b> in Claude API costs${so}`,
       "Billed to your Anthropic API key, as Claude reports each batch's cost."]
@@ -1308,6 +1309,7 @@
         maxBytes = s.maxUploadMb * 1048576
         direct = !!s.direct
         if (/^[+-]\d{4}$/.test(s.tz || "")) serverTz = s.tz
+        if (s.creditsName) creditsName = s.creditsName
         if (direct) $("where").textContent = "Everything is kept in your wiki's own encrypted storage."
         for (const p of [...s.queue.intake, ...s.queue.inbox]) row(p)  // also files added outside this page
         if (s.now) onNow(s.now)
