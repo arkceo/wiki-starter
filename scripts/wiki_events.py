@@ -214,7 +214,9 @@ def set_now(phase, **fields):
     if batch and phase != "idle":
         rec.setdefault("batch", batch)
     if not rec.get("since"):
-        same = all(prev.get(k) == rec.get(k) for k in ("phase", "file", "detail"))
+        # The same step of the same run only: a record left by an earlier run (a cloud wiki
+        # keeps it between machines) must not date this run's step from that run's start.
+        same = all(prev.get(k) == rec.get(k) for k in ("phase", "file", "detail", "run"))
         rec["since"] = prev.get("since") if same and prev.get("since") else t
     if any(prev.get(k) != rec.get(k) for k in PROGRESS_KEYS):
         progressed()

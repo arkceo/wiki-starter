@@ -439,7 +439,7 @@
       <button type="button" class="add-title" id="pick"><span class="idle-only">Drop anything, I'll build the wiki.</span><span class="over-only">Let go: I'll take it from here.</span></button>
       <p class="small muted">Photos, PDFs, Word, Excel, scans and whole folders, many at once. No need to sort them first:
         click to choose files, or drop them anywhere on this page.</p>
-      <p class="small muted"><span id="limit"></span> Update Packets (<code>.md</code>) update the wiki. Everything stays on this Mac.
+      <p class="small muted"><span id="limit"></span> Update Packets (<code>.md</code>) update the wiki. <span id="where">Everything stays on this Mac.</span>
         <button type="button" class="linkish" id="pick-folder">Choose a folder</button></p>
     </div>
     <input type="file" id="file-input" multiple>
@@ -670,7 +670,12 @@
     if (m < 60) return m + "m " + String(s % 60).padStart(2, "0") + "s"
     return Math.floor(m / 60) + "h " + String(m % 60).padStart(2, "0") + "m"
   }
-  const when = (t) => { const ms = t ? Date.parse(t) : NaN; return isNaN(ms) ? Date.now() : ms }
+  // The engine writes its times without a zone, in the server's own (status "tz", "+0800"):
+  // read them in that zone, not the browser's, or a server in another zone shifts every timer.
+  let serverTz = ""
+  const zoned = (t) => serverTz && /^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d)?$/.test(t)
+    ? t.replace(" ", "T") + serverTz.slice(0, 3) + ":" + serverTz.slice(3) : t
+  const when = (t) => { const ms = t ? Date.parse(zoned(t)) : NaN; return isNaN(ms) ? Date.now() : ms }
   const pageUrl = (p) => SITE + "/" + p.replace(/^wiki\//, "").replace(/\.md$/, "").replace(/(^|\/)index$/, "$1")
     .split("/").map((s) => encodeURIComponent(s.replace(/ /g, "-"))).join("/")
   const rawUrl = (p) => SITE + "/" + p.split("/").map(encodeURIComponent).join("/")
@@ -1102,7 +1107,19 @@
       case "build-start": logLine(e.t, "Updating the website…"); break
       case "build-done": logLine(e.t, "Website updated. Open wiki pages show the changes by themselves.", "ok"); break
       case "build-failed": logLine(e.t, "The website could not be rebuilt; the previous version is still shown", "bad"); break
-      case "run-end": logLine(e.t, `Done: ${e.docs || 0} document(s), ${e.packets || 0} packet(s)`, "ok"); pollSoon(); break
+      case "run-end": {
+        logLine(e.t, `Done: ${e.docs || 0} document(s), ${e.packets || 0} packet(s)`, "ok")
+        // A run that ends (or is stopped) with files still mid-step leaves nothing at work: put
+        // them back to waiting, so none stays "In progress" with its clock running.
+        for (const r of rows.values()) {
+          if (r.final || r.retry) continue   // a file to be tried again already says so
+          if (r.kind === "packet" && ["reading", "applying"].includes(r.state)) setState(r, "queued", e.t, true)
+          else if (["converting", "ocr", "reading", "filing", "applying"].includes(r.state)) setState(r, "converted", e.t, true)
+        }
+        render()
+        pollSoon()
+        break
+      }
       case "rerun": logLine(e.t, `${e.count || "More"} file(s) arrived meanwhile; starting again`); break
       case "error": {
         if (f) { const r = row(f); if (!r.final) { r.retry = true; r.note = e.msg || "" } }
@@ -1290,6 +1307,8 @@
         $("limit").textContent = `Up to ${s.maxUploadMb} MB per file.`
         maxBytes = s.maxUploadMb * 1048576
         direct = !!s.direct
+        if (/^[+-]\d{4}$/.test(s.tz || "")) serverTz = s.tz
+        if (direct) $("where").textContent = "Everything is kept in your wiki's own encrypted storage."
         for (const p of [...s.queue.intake, ...s.queue.inbox]) row(p)  // also files added outside this page
         if (s.now) onNow(s.now)
         render()

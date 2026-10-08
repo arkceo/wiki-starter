@@ -9,7 +9,7 @@
 FROM public.ecr.aws/docker/library/node:22-bookworm-slim
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-venv git ca-certificates openssl \
+ && apt-get install -y --no-install-recommends python3 python3-venv git ca-certificates openssl tzdata \
  && rm -rf /var/lib/apt/lists/*
 
 COPY . /opt/engine
@@ -30,5 +30,8 @@ RUN python3 -m venv /opt/job-venv && /opt/job-venv/bin/pip install --no-cache-di
 
 # A session (cloud/session.py, started with that command instead) opens its one door here.
 EXPOSE 8443
+# The wiki's clock: Malaysia, where its owners are, so the live log and the timers read in
+# their time (the Upload page also corrects for the zone, via the server's "tz").
+ENV TZ=Asia/Kuala_Lumpur
 ENV WIKI_DEPS=/opt/wiki-deps WIKI_ENGINE_DIR=/opt/engine PYTHONDONTWRITEBYTECODE=1
 CMD ["/opt/job-venv/bin/python", "/opt/engine/cloud/job.py"]

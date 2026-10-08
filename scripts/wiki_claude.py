@@ -21,8 +21,9 @@ CLAUDE.md), with no settings files and no MCP servers, signed in the way the run
 in (an API key or a Claude plan). Standard library only.
 
 On Nucleus Cloud ("engine": "credits" in wiki.config.json, with WIKI_CREDITS_URL and
-WIKI_CREDITS_TOKEN set) there is no claude command: each question goes instead to the
-credits service's /v1/step, as one message with no tools, the schema written into the
+WIKI_CREDITS_TOKEN set; WIKI_CREDITS_BYPASS too for a service behind a Vercel preview's
+protection, and WIKI_CREDITS_NAME for the name its notices use) there is no claude
+command: each question goes instead to the credits service's /v1/step, as one message with no tools, the schema written into the
 system prompt and the answer read back as JSON. A picture the question names inside
 read_dirs goes with it as an image; nothing else on the computer is sent.
 """
@@ -144,6 +145,11 @@ def credits_service():
     url = (os.environ.get("WIKI_CREDITS_URL") or "").strip().rstrip("/")
     token = (os.environ.get("WIKI_CREDITS_TOKEN") or "").strip()
     return (url, token) if url and token else None
+
+
+def _credits_name():
+    """The credits service's name as its owners know it (WIKI_CREDITS_NAME): Nucleus unless set."""
+    return (os.environ.get("WIKI_CREDITS_NAME") or "").strip()[:40] or "Nucleus"
 
 
 def pictures_named(user, read_dirs):
@@ -301,9 +307,12 @@ class Claude:
         body = {"kind": CREDITS_KIND, "model": credits_model(model),
                 "system": sysmsg + SCHEMA_NOTE + json.dumps(loose(schema)),
                 "messages": [{"role": "user", "content": content}]}
+        headers = {"Content-Type": "application/json", "User-Agent": "wiki-starter", "Authorization": "Bearer " + token}
+        bypass = (os.environ.get("WIKI_CREDITS_BYPASS") or "").strip()
+        if bypass:  # a credits service on a Vercel preview behind Deployment Protection
+            headers["x-vercel-protection-bypass"] = bypass
         req = urllib.request.Request(url + "/v1/step", data=json.dumps(body).encode("utf-8"), method="POST",
-                                     headers={"Content-Type": "application/json", "User-Agent": "wiki-starter",
-                                              "Authorization": "Bearer " + token})
+                                     headers=headers)
         t0 = time.time()
         with self.lock:
             if self.stopped:
@@ -318,9 +327,9 @@ class Claude:
             except (ValueError, AttributeError, OSError):
                 said = ""
             if e.code == 402:
-                raise ClaudeUnavailable("credit balance is too low: top up Nucleus credits")
+                raise ClaudeUnavailable(f"credit balance is too low: top up {_credits_name()} credits")
             if e.code in (401, 403):
-                raise ClaudeUnavailable("not signed in to Nucleus credits")
+                raise ClaudeUnavailable(f"not signed in to {_credits_name()} credits")
             if e.code >= 500 or e.code in (408, 429):
                 raise ClaudeUnavailable(f"the credits service failed (HTTP {e.code}) {said}".strip())
             raise RuntimeError(f"Claude: the credits service refused the question (HTTP {e.code}): {said}")

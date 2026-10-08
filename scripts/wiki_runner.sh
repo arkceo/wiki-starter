@@ -522,7 +522,7 @@ run_claude() { # label prompt-file max-turns [batch-file]
   fi
   # On Nucleus Cloud there is no Claude Code session: only one question at a time.
   if [ "$ENGINE" = credits ]; then
-    log "claude $label: refused, this wiki reads through Nucleus credits"
+    log "claude $label: refused, this wiki reads through ${WIKI_CREDITS_NAME:-Nucleus} credits"
     return 1
   fi
   budget=${SPEND_CAP:-5}
@@ -586,9 +586,11 @@ claude_problem() { # reason
   why=$(printf '%s' "${1#Claude could not run: }" | tr '\n\t' '  ' | cut -c1-160)
   low=$(printf '%s' "$why" | tr 'A-Z' 'a-z')
   if [ "${ENGINE:-}" = credits ]; then   # Nucleus Cloud: Claude is paid with Nucleus credits
+    # The service's own name, as its owners see it (WIKI_CREDITS_NAME; Nucleus unless set).
+    local CREDITS_NAME="${WIKI_CREDITS_NAME:-Nucleus}"
     case "$low" in
-      *"credit balance"*) echo "The wiki could not read: your Nucleus credits have run out. Top up in Nucleus (Settings, Nucleus credits). Nothing is lost: the documents wait." ;;
-      *"not signed in"*) echo "The wiki could not read: Nucleus is signed out of Nucleus credits. Sign in again in Nucleus. Nothing is lost: the documents wait." ;;
+      *"credit balance"*) echo "The wiki could not read: your $CREDITS_NAME credits have run out. Top up in $CREDITS_NAME (Settings, $CREDITS_NAME credits). Nothing is lost: the documents wait." ;;
+      *"not signed in"*) echo "The wiki could not read: $CREDITS_NAME is signed out of $CREDITS_NAME credits. Sign in again in $CREDITS_NAME. Nothing is lost: the documents wait." ;;
       *) echo "The wiki could not read${why:+ ($why)}. Nothing is lost: the documents wait, and the next run tries again." ;;
     esac
     return 0

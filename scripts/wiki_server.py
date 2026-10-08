@@ -469,6 +469,9 @@ def status():
         "version": version,
         "maxUploadMb": round(max_upload_bytes() / 1024 / 1024),
         "direct": bool(UPLOAD_HELPER),
+        # The engine's times carry no zone; this is the zone they are in ("+0800"), so a
+        # browser elsewhere (a cloud wiki on a server in UTC) times its steps right.
+        "tz": time.strftime("%z"),
         "queue": queue,
         "needsReview": list_queue("raw/_needs-review"),
         "review": {"open": wiki_review.count_open(), "rev": wiki_review.revision()},

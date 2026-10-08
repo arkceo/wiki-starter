@@ -2,6 +2,14 @@
 
 Newest first. Shown to the SME after "Update Wiki Engine".
 
+## The Upload page's clocks are right
+- **Timers count from when a step began.** A file's "Reading · 2m" now counts from when this
+  run reached it, in the right time zone, not from an earlier run or hours off.
+- **A finished run leaves nothing "In progress".** Files a run stopped part-way are shown
+  waiting their turn again, with no clock running.
+- **In the cloud the Upload page says where files go:** your wiki's own encrypted storage,
+  not "this Mac".
+
 ## A cloud wiki runs the same engine as your Mac
 - **Nothing changes on your Mac.**
 - **In the cloud, the wiki's own Upload page.** A cloud service (oeru) can now run this
